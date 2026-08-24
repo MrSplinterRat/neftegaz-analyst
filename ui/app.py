@@ -30,14 +30,23 @@ EXAMPLES = [
 
 
 @st.cache_resource(show_spinner=False)
-def corpus_size() -> int:
-    """Number of indexed chunks, or 0 if the index has not been built."""
+def corpus_size() -> tuple[int, str | None]:
+    """Number of indexed chunks, plus the reason the count is unavailable.
+
+    Two very different states used to collapse into the same zero: an index
+    that has not been built yet, and an index that exists but cannot be
+    opened. The second one is routine here — embedded Qdrant admits a single
+    writer, so a concurrent scripts/run_demo.py, a second container or another
+    UI instance holds the storage folder. Reporting that as "the corpus is
+    empty, go build it" sends the user to rebuild an index that is already
+    there, so the cause is carried out instead of being swallowed.
+    """
     try:
         from neftegaz.rag.store import get_store
 
-        return get_store().count()
-    except Exception:  # noqa: BLE001 - an absent index is a normal first-run state
-        return 0
+        return get_store().count(), None
+    except Exception as exc:  # noqa: BLE001 - the cause is reported, not hidden
+        return 0, str(exc)
 
 
 def render_sidebar() -> None:
@@ -45,8 +54,19 @@ def render_sidebar() -> None:
         st.header("Конфигурация")
         st.caption("Всё задаётся через .env — см. .env.example")
 
-        chunks = corpus_size()
-        if chunks:
+        chunks, unavailable = corpus_size()
+        if unavailable:
+            # Отказ не кэшируем: держатель блокировки уходит, и следующий
+            # прогон страницы должен увидеть базу, а не замороженную ошибку.
+            corpus_size.clear()
+            st.warning(
+                "База отчётов сейчас недоступна — индекс не открывается.\n\n"
+                "Обычная причина: встроенный Qdrant допускает одного "
+                "писателя, а каталог занят другим процессом "
+                "(scripts/run_demo.py, второй контейнер, ещё один UI).\n\n"
+                f"Ответ хранилища: {unavailable}"
+            )
+        elif chunks:
             st.success(f"База отчётов: {chunks} фрагментов")
         else:
             st.warning(
