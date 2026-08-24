@@ -17,13 +17,14 @@ Russian — so retrieval here is cross-lingual by construction. See
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from functools import lru_cache
 
 from neftegaz.config import settings
 
-__all__ = ["Hit", "ReportStore", "get_store"]
+__all__ = ["Hit", "ReportStore", "carries_no_data", "get_store"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,169 @@ class Hit:
         }
 
 
+# Во сколько раз шире top_k забираем перед переупорядочиванием.
+RERANK_POOL_FACTOR = 4
+
+# ── слияние двух выдач ─────────────────────────────────────────────────────
+# ★СЛИВАЮТСЯ МЕСТА, А НЕ ВЕСА. Косинус лежит в [0, 1] и у нас занимает узкую
+# полосу около 0.6-0.75; вес BM25 не ограничен сверху и зависит от длины
+# запроса. Сложить их напрямую — значит молча решить, что единица одной шкалы
+# стоит столько же, сколько единица другой. Ровно этот класс ошибки уже стоил
+# нам сегодня одной неверной правки («поправка больше сигнала»). Место в списке
+# безразмерно, и потому складывать места законно.
+#
+# Reciprocal Rank Fusion: вклад документа = 1 / (RRF_K + место). Смягчитель
+# RRF_K нужен, чтобы первое место не весило непропорционально много: без него
+# вклад первого вдвое больше второго, и слияние вырождается в «побеждает тот,
+# кто первый хоть где-то». При RRF_K = 60 первые десять мест почти равноценны,
+# и документ, стоящий в обоих списках в середине, обгоняет чемпиона одного
+# списка — что и требуется: согласие двух разных способов ценнее уверенности
+# одного. Значение 60 — из работы Cormack et al. (2009), где оно и предложено;
+# своего замера под него у нас нет, и выдавать его за настроенный нельзя.
+RRF_K = 60
+
+DIGIT_RATIO_FLOOR = 0.02   # ниже этого текст считается прозой без данных
+DIGIT_RATIO_CEILING = 0.20  # выше — плотная таблица; дальше бонус не растёт
+
+DATA_BONUS = 0.06           # максимальная прибавка к косинусу
+
+_NUMBER = re.compile(r"-?\d+\.?\d*")
+
+# ★Штраф за шкалу оси. Он ЗАВЕДОМО БОЛЬШЕ бонуса за плотность цифр, и это не
+# перестраховка: страница с графиком набирает бонус ПОЛНОСТЬЮ (метки осей —
+# сплошные числа), так что меньший штраф её не подвинул бы. Штраф не отсеивает,
+# а понижает: если ничего лучше в корпусе нет, подпись к графику всё равно
+# дойдёт до модели — пусть с оговоркой, но дойдёт.
+AXIS_PENALTY = 0.10
+
+# Обороты, которыми написаны глоссарии и методологические приложения STEO.
+# ★Это НЕ признак мусора сам по себе: та же сноска стоит под таблицей, и чанк
+# нередко захватывает хвост таблицы вместе с ней. Поэтому маркеры только
+# ПОНИЖАЮТ ранг, и понижение перебивается бонусом за плотность чисел —
+# отсеивать по ним значило бы выбрасывать данные ради сноски (замерено:
+# фильтр по маркерам убирал 10% корпуса, и среди убранного были таблицы).
+BOILERPLATE_MARKERS = (
+    "defined in the glossary",
+    "= organization for",
+    "purchasing power parity",
+    "apparent consumption",
+    "oxford economics",
+    "stand-alone report",
+)
+BOILERPLATE_PENALTY = 0.04
+
+
+def embeddable(chunk: dict) -> str:
+    """Что именно вкладывается в вектор: заголовок таблицы плюс сам фрагмент.
+
+    Отделено в функцию, чтобы индексация и любая будущая переиндексация не могли
+    разойтись в том, что считалось смыслом фрагмента. Разойдись они — половина
+    корпуса оказалась бы в одном пространстве, половина в другом, и обнаружилось
+    бы это не ошибкой, а тихим ухудшением выдачи.
+    """
+    context = (chunk.get("context") or "").strip()
+    text = chunk["text"]
+    return f"{context}\n{text}" if context else text
+
+
+def digit_ratio(text: str) -> float:
+    """Доля цифр в тексте. Дешёвый признак «здесь данные, а не рассуждение»."""
+    if not text:
+        return 0.0
+    return sum(character.isdigit() for character in text) / len(text)
+
+
+AXIS_RUN = 5  # сколько равноотстоящих чисел подряд считать шкалой
+
+
+def axis_scale(text: str) -> bool:
+    """Есть ли в тексте ШКАЛА ОСИ — арифметическая прогрессия чисел.
+
+    ★ЗАЧЕМ. Страница с графиком после извлечения из PDF превращается в подпись,
+    легенду и метки осей: «11.5 12.0 12.5 13.0 13.5 14.0 14.5». Цифр там больше,
+    чем в иной таблице, а данных нет ни одного. Плотность цифр такую страницу не
+    отличает — она её ПОДНИМАЕТ, и именно так «до 14.5 млн барр./сут» однажды
+    попало в ответ, будучи потолком оси Y, а не прогнозом EIA.
+
+    ★ЧТО ИСКЛЮЧЕНО НАМЕРЕННО, ПОТОМУ ЧТО ЭТО ЗАКОННЫЕ ТАБЛИЦЫ:
+    * ряд лет («2024 2025 2026 2027 2028») — заголовок колонок, шаг 1 по целым
+      внутри 1900–2100;
+    * нумерация строк («1 2 3 4 5») — шаг 1 по целым.
+    Настоящая таблица значений прогрессий не даёт вовсе: замерено на корпусе,
+    у ряда «103.44 105.01 107.75 108.20 …» их ноль.
+    """
+    numbers = [float(found) for found in _NUMBER.findall(text)]
+    for start in range(len(numbers) - AXIS_RUN + 1):
+        window = numbers[start : start + AXIS_RUN]
+        steps = {round(window[i + 1] - window[i], 6) for i in range(AXIS_RUN - 1)}
+        if len(steps) != 1:
+            continue
+        step = steps.pop()
+        if step == 0:
+            continue
+        whole = all(value == int(value) for value in window)
+        if whole and all(1900 <= value <= 2100 for value in window):
+            continue  # годы
+        if whole and abs(step) == 1:
+            continue  # нумерация
+        return True
+    return False
+
+
+def rerank_score(text: str, score: float) -> float:
+    """Поправить косинус за содержательность фрагмента.
+
+    Векторная близость меряет «про то же самое», а не «содержит ответ».
+    Глоссарий с определением ОЭСР и таблица с прогнозом добычи одинаково
+    «про нефть», и на запросе про цифры глоссарий выигрывает, потому что в нём
+    те же слова идут сплошной прозой.
+
+    ★ТРИ КЛАССА, А НЕ ДВА — урок, оплаченный ошибкой 24.08.2026. Плотность цифр
+    сама по себе неспособна упорядочить корпус, потому что классов здесь три, и
+    по этой оси они не выстраиваются:
+
+        глоссарий          цифр мало   данных нет
+        подпись к графику  цифр МНОГО  данных НЕТ
+        таблица            цифр много  данные ЕСТЬ
+
+    Сильный бонус давит глоссарии и поднимает подписи; слабый делает наоборот
+    (замерено: 11/23 фрагментов с числами → 8/23). Крутить ВЕС бесполезно —
+    нужен второй ПРИЗНАК, разделяющий два верхних класса. Им служит шкала оси
+    (см. axis_scale): у подписи к графику числа образуют арифметическую
+    прогрессию, у таблицы — нет.
+
+    Здесь ранее стоял вывод «поправка больше сигнала, который правит». Он был
+    правдоподобен и неверен: дело не в весе, а в том, что признак не различал
+    того, что должен был.
+    """
+    ratio = digit_ratio(text)
+    span = DIGIT_RATIO_CEILING - DIGIT_RATIO_FLOOR
+    normalised = min(max(ratio - DIGIT_RATIO_FLOOR, 0.0), span) / span
+    adjusted = score + DATA_BONUS * normalised
+
+    if axis_scale(text):
+        adjusted -= AXIS_PENALTY
+
+    lowered = text.lower()
+    if any(marker in lowered for marker in BOILERPLATE_MARKERS):
+        adjusted -= BOILERPLATE_PENALTY
+    return adjusted
+
+
+def carries_no_data(text: str) -> bool:
+    """Заведомо не содержит данных: шкала оси графика или служебная страница.
+
+    Тот же признак, по которому векторная ветвь вычитает из косинуса, здесь
+    выражен как «да/нет». Он выделен отдельной функцией нарочно: два ответа на
+    один вопрос, разъехавшиеся со временем, — это отказ, который никак себя не
+    проявит, кроме как странной выдачей через полгода.
+    """
+    if axis_scale(text):
+        return True
+    lowered = text.lower()
+    return any(marker in lowered for marker in BOILERPLATE_MARKERS)
+
+
 class ReportStore:
     """Thin wrapper over Qdrant: index chunks, search them, report health."""
 
@@ -56,6 +220,9 @@ class ReportStore:
         self._client = None
         self._encoder = None
         self._dimension: int | None = None
+        self._keyword = None
+        self._keyword_ids: list = []
+        self._keyword_payloads: list[dict] = []
 
     # ── lazy resources ─────────────────────────────────────────────────────
     # Both the client and the encoder are expensive and are not needed by every
@@ -144,13 +311,22 @@ class ReportStore:
         written = 0
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start : start + batch_size]
-            vectors = self._embed_passages([c["text"] for c in batch])
+            # ★Вкладывается заголовок таблицы ВМЕСТЕ с текстом, а хранится текст
+            # отдельно. Продолжение таблицы — это строка без единого слова, и её
+            # эмбеддинг сам по себе шум: сближать запрос «добыча нефти в США» с
+            # «20.31 20.51 20.97» не с чем. Заголовок даёт числам имя.
+            # Показывать и цитировать при этом полагается ТОЛЬКО text: он обязан
+            # дословно совпадать со страницей отчёта, иначе ссылка перестаёт быть
+            # проверяемой — а проверяемость и есть предмет поставки.
+            vectors = self._embed_passages([embeddable(c) for c in batch])
             points = [
                 PointStruct(
                     id=uuid.uuid4().hex,
                     vector=vector,
                     payload={
                         "text": chunk["text"],
+                        "context": chunk.get("context", ""),
+                        "kind": chunk.get("kind", "window"),
                         "source_name": chunk["source_name"],
                         "date": chunk["date"],
                         "page": chunk["page"],
@@ -162,6 +338,58 @@ class ReportStore:
             self.client.upsert(collection_name=self.collection, points=points)
             written += len(points)
         return written
+
+    # ── поиск по словам ────────────────────────────────────────────────────
+
+    @property
+    def keyword(self):
+        """Индекс BM25 по всему корпусу, собираемый при первом обращении.
+
+        ★СОБИРАЕТСЯ ИЗ QDRANT, А НЕ ИЗ ФАЙЛОВ. Источником служит то же самое
+        хранилище, по которому идёт векторный поиск, — иначе два способа искали
+        бы по разным корпусам и расхождение выдач нельзя было бы отличить от
+        расхождения данных.
+
+        Индекс живёт вместе с процессом и не замечает переиндексации, случившейся
+        у него под руками. Для нашей поставки это верно: корпус собирается
+        отдельной командой, до запуска агента. Появится дозагрузка на ходу —
+        понадобится сброс, и лучше явный, чем угаданный по счётчику.
+        """
+        if self._keyword is None:
+            self._build_keyword_index()
+        return self._keyword
+
+    def _build_keyword_index(self) -> None:
+        from neftegaz.rag.keyword import BM25Index
+
+        index = BM25Index()
+        ids: list = []
+        payloads: list[dict] = []
+        if self.client.collection_exists(self.collection):
+            offset = None
+            while True:
+                points, offset = self.client.scroll(
+                    collection_name=self.collection,
+                    limit=512,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    # Индексируется то же, что вкладывалось в эмбеддинг: текст
+                    # вместе с заголовком таблицы. Без заголовка строка «United
+                    # States … 13.28» не нашлась бы по слову «production» — оно
+                    # стоит не в строке, а в названии таблицы над ней.
+                    index.add(f"{payload.get('context', '')}\n{payload.get('text', '')}")
+                    ids.append(point.id)
+                    payloads.append(payload)
+                if offset is None:
+                    break
+        index.finalise()
+        self._keyword = index
+        self._keyword_ids = ids
+        self._keyword_payloads = payloads
 
     # ── read path ──────────────────────────────────────────────────────────
 
@@ -176,30 +404,116 @@ class ReportStore:
             return []
         top_k = settings.top_k if top_k is None else top_k
         floor = settings.min_score if min_score is None else min_score
+        pool = top_k * RERANK_POOL_FACTOR
 
+        query_vector = self._embed_query(query)
+
+        # ── ветвь первая: близость по смыслу ───────────────────────────────
+        # Берём с запасом и переупорядочиваем: нужный фрагмент часто лежит за
+        # пределами top-k по чистому косинусу (замерено — таблица с запасами
+        # США была на позиции ниже пятой, вытесненная глоссариями).
         found = self.client.query_points(
             collection_name=self.collection,
-            query=self._embed_query(query),
-            limit=top_k,
+            query=query_vector,
+            limit=pool,
             with_payload=True,
         ).points
+        vector_ranked = sorted(
+            (
+                (point, rerank_score((point.payload or {}).get("text", ""), float(point.score)))
+                for point in found
+                if point.score >= floor
+            ),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+
+        # ── ветвь вторая: совпадение по словам ─────────────────────────────
+        from neftegaz.rag.keyword import expand_query
+
+        keyword_ranked = self.keyword.rank(expand_query(query), limit=pool)
+
+        # ── слияние ────────────────────────────────────────────────────────
+        fused: dict = {}
+        payload_of: dict = {}
+        cosine_of: dict = {}
+        for place, (point, _adjusted) in enumerate(vector_ranked):
+            fused[point.id] = fused.get(point.id, 0.0) + 1.0 / (RRF_K + place + 1)
+            payload_of[point.id] = point.payload or {}
+            cosine_of[point.id] = float(point.score)
+
+        for place, (position, _weight) in enumerate(keyword_ranked):
+            payload = self._keyword_payloads[position]
+            # ★Дисквалификация, а не смягчающая поправка. В векторной ветви
+            # подпись к графику наказывается вычитанием из косинуса — там есть
+            # откалиброванная шкала, на которой такая поправка что-то значит. В
+            # словесной ветви такой шкалы нет, и подобрать её сейчас было бы
+            # угадыванием. Зато про эти два класса известно определённое: ни
+            # шкала оси графика, ни служебная страница не содержат данных, за
+            # которыми сюда приходят. Не пускать их вовсе честнее, чем пускать
+            # с вычитанием, взятым с потолка.
+            if carries_no_data(payload.get("text", "")):
+                continue
+            identifier = self._keyword_ids[position]
+            fused[identifier] = fused.get(identifier, 0.0) + 1.0 / (RRF_K + place + 1)
+            payload_of.setdefault(identifier, payload)
+
+        order = sorted(fused, key=lambda identifier: fused[identifier], reverse=True)
+
+        # ★Порог применяется и к пришедшим по словам, для чего им приходится
+        # ДОСЧИТАТЬ косинус. Пропустить фрагмент мимо порога только потому, что
+        # он пришёл другой дорогой, значило бы отдать в ответ то, что векторная
+        # ветвь отвергла бы как не относящееся к вопросу.
+        missing = [identifier for identifier in order if identifier not in cosine_of]
+        if missing:
+            cosine_of.update(self._cosines(missing, query_vector))
 
         hits = []
-        for point in found:
-            if point.score < floor:
+        for identifier in order:
+            score = cosine_of.get(identifier, 0.0)
+            if score < floor:
                 continue
-            payload = point.payload or {}
+            payload = payload_of[identifier]
             hits.append(
                 Hit(
                     text=payload.get("text", ""),
-                    score=float(point.score),
+                    # Отдаём исходный косинус, а не поправленный: поправка —
+                    # внутренний приём упорядочивания, и показывать её как
+                    # «близость» значило бы отчитываться числом, которого
+                    # модель эмбеддингов не выдавала.
+                    score=score,
                     source_name=payload.get("source_name", "unknown"),
                     date=payload.get("date", ""),
                     page=int(payload.get("page", 0)),
                     page_end=int(payload.get("page_end", payload.get("page", 0))),
                 )
             )
+            if len(hits) == top_k:
+                break
         return hits
+
+    def _cosines(self, identifiers: list, query_vector: list[float]) -> dict:
+        """Косинус между запросом и указанными точками — досчёт для словесной ветви."""
+        import math
+
+        points = self.client.retrieve(
+            collection_name=self.collection,
+            ids=identifiers,
+            with_payload=False,
+            with_vectors=True,
+        )
+        query_norm = math.sqrt(sum(value * value for value in query_vector)) or 1.0
+        result = {}
+        for point in points:
+            vector = point.vector
+            if isinstance(vector, dict):  # именованные векторы — берём единственный
+                vector = next(iter(vector.values()))
+            if not vector:
+                continue
+            norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+            dot = sum(a * b for a, b in zip(query_vector, vector))
+            result[point.id] = dot / (query_norm * norm)
+        return result
 
     def count(self) -> int:
         if not self.client.collection_exists(self.collection):
