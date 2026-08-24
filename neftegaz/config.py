@@ -1,0 +1,112 @@
+"""Configuration, read once from the environment.
+
+Everything tunable lives in `.env` (see `.env.example`). Nothing in this
+project reads `os.environ` directly except this module, so there is exactly one
+place to look when a deployment behaves unexpectedly.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+ROOT = Path(__file__).resolve().parent.parent
+
+__all__ = ["Settings", "settings", "ROOT"]
+
+
+def _env(name: str, default: str) -> str:
+    value = os.getenv(name)
+    return default if value is None or value == "" else value
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Resolved configuration for one process."""
+
+    # ── LLM ────────────────────────────────────────────────────────────────
+    # Any OpenAI-compatible endpoint. The default points at a local llama.cpp
+    # server so the project runs with no account and no key; set
+    # OPENAI_BASE_URL / OPENAI_API_KEY to use a hosted model instead.
+    llm_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "http://127.0.0.1:8081/v1"))
+    llm_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", "not-needed-for-local"))
+    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "local"))
+    llm_temperature: float = field(default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.1))
+    llm_timeout: int = field(default_factory=lambda: _env_int("LLM_TIMEOUT", 300))
+
+    # ── Embeddings ─────────────────────────────────────────────────────────
+    # Local by default: the report corpus must not leave the machine, and a
+    # local model removes one more key from the setup path.
+    #
+    # The default is multilingual and small (~0.5 GB, 384 dims). Multilingual
+    # is not optional here: the corpus is in English (EIA/OPEC/IEA publish in
+    # English) while questions arrive in Russian, so retrieval is cross-lingual
+    # by nature. Set EMBEDDING_MODEL=intfloat/multilingual-e5-large for better
+    # quality at ~2.2 GB and roughly 4x the indexing time.
+    embedding_model: str = field(
+        default_factory=lambda: _env(
+            "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        )
+    )
+
+    # ── Vector store ───────────────────────────────────────────────────────
+    # Embedded Qdrant writing to a local directory: no separate service to run,
+    # which is what lets `docker run` be a single command.
+    qdrant_path: str = field(default_factory=lambda: _env("QDRANT_PATH", str(ROOT / "data" / "qdrant")))
+    qdrant_url: str = field(default_factory=lambda: _env("QDRANT_URL", ""))
+    collection: str = field(default_factory=lambda: _env("QDRANT_COLLECTION", "reports"))
+
+    # ── Retrieval ──────────────────────────────────────────────────────────
+    top_k: int = field(default_factory=lambda: _env_int("RAG_TOP_K", 5))
+    # Below this cosine score a hit is treated as "the corpus does not cover
+    # this", which is what triggers the web fallback in the routing logic.
+    #
+    # 0.55 is measured, not guessed. On the EIA STEO corpus with the default
+    # embedding model, best-hit scores separate cleanly:
+    #   industry questions   0.700 … 0.819   (Russian query, English corpus)
+    #   off-topic questions  0.140 … 0.452
+    # The gap is 0.248 wide; the threshold sits in the middle of it, leaning
+    # towards recall — a weak fragment shown to the model costs little, while a
+    # missed one sends the agent to the web for something the corpus contained.
+    # ★Re-measure after changing the embedding model: cosine scores are not
+    # comparable across models, and a threshold carried over blindly will
+    # either flood the context or silently empty it.
+    min_score: float = field(default_factory=lambda: _env_float("RAG_MIN_SCORE", 0.55))
+    chunk_size: int = field(default_factory=lambda: _env_int("CHUNK_SIZE", 1200))
+    chunk_overlap: int = field(default_factory=lambda: _env_int("CHUNK_OVERLAP", 200))
+
+    # ── Web search ─────────────────────────────────────────────────────────
+    web_results: int = field(default_factory=lambda: _env_int("WEB_RESULTS", 5))
+    web_region: str = field(default_factory=lambda: _env("WEB_REGION", "ru-ru"))
+
+    # ── Data locations ─────────────────────────────────────────────────────
+    reports_dir: str = field(default_factory=lambda: _env("REPORTS_DIR", str(ROOT / "data" / "reports")))
+    prices_csv: str = field(default_factory=lambda: _env("PRICES_CSV", str(ROOT / "data" / "prices" / "brent.csv")))
+
+
+settings = Settings()
