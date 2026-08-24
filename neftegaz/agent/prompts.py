@@ -73,7 +73,9 @@ OUT_OF_SCOPE_REPLY = (
 )
 
 
-def build_answer_prompt(question: str, report_context: str, web_context: str) -> str:
+def build_answer_prompt(
+    question: str, report_context: str, web_context: str, forecast_context: str = ""
+) -> str:
     """Assemble the final answering prompt from whatever context was gathered.
 
     Absent context is stated explicitly rather than omitted. An empty section
@@ -81,11 +83,31 @@ def build_answer_prompt(question: str, report_context: str, web_context: str) ->
     "поиск выполнен, релевантных фрагментов не найдено" reads as "the corpus was
     searched and came up empty", which is the fact and which the answer should
     reflect.
+
+    The forecast gets a section of its own, with its own citation format. It
+    used to be folded into the report context, and the model — correctly
+    following the rule it had been given — dressed a calculation in the report
+    citation template, emitting "[Отчёт расчётный модуль…, дата не указана,
+    с. не указана]". A source of a different kind needs a mark of a different
+    kind, not the nearest available template with the missing fields blanked.
     """
     reports = report_context.strip() or (
         "(поиск по базе отчётов выполнен, релевантных фрагментов не найдено)"
     )
     web = web_context.strip() or "(веб-поиск не выполнялся или ничего не вернул)"
+
+    forecast_block = ""
+    forecast_rule = ""
+    if forecast_context.strip():
+        forecast_block = f"""
+=== ИСТОЧНИК 3: СОБСТВЕННЫЙ РАСЧЁТ (воспроизводимый, наивысший приоритет для чисел прогноза) ===
+{forecast_context.strip()}
+"""
+        forecast_rule = (
+            "\n- Числа прогноза бери ТОЛЬКО из блока собственного расчёта и ссылайся на него\n"
+            "  в формате [Расчёт: <метод>, горизонт <N> дн.] — метод и горизонт указаны в блоке.\n"
+            "  ★Не оформляй расчёт как отчёт: у него нет ни даты публикации, ни страницы."
+        )
 
     return f"""Вопрос пользователя:
 {question}
@@ -95,7 +117,7 @@ def build_answer_prompt(question: str, report_context: str, web_context: str) ->
 
 === ИСТОЧНИК 2: ВЕБ-ПОИСК (дополнительный, непроверяемый) ===
 {web}
-
+{forecast_block}
 ЗАДАНИЕ
 Ответь на вопрос, опираясь на приведённые источники.
 
@@ -103,8 +125,13 @@ def build_answer_prompt(question: str, report_context: str, web_context: str) ->
 - После каждого тезиса из отчёта ставь ссылку в формате
   [Отчёт <название>, <дата>, с. <страница>] — данные бери из заголовка фрагмента.
 - После каждого тезиса из веба ставь ссылку в формате
-  [Источник: <название>, web].
+  [Источник: <название>, web].{forecast_rule}
 - Не смешивай источники в одном предложении: у каждого утверждения одна ссылка.
-- Если ответа нет ни в отчётах, ни в вебе — скажи об этом прямо и не выдумывай.
+- ★Итоговый абзац («Вывод», «Итого», «Таким образом») — такое же утверждение,
+  как остальные, и повторённые в нём числа обязаны нести ту же ссылку. Абзац
+  без ссылки читается как твоё собственное мнение, а не как выписка из
+  источника: читатель не может его проверить, а именно проверяемость и есть
+  цель разметки.
+- Если ответа нет ни в источниках — скажи об этом прямо и не выдумывай.
 - Числа переноси из источников дословно. Не округляй и не пересчитывай молча.
 """

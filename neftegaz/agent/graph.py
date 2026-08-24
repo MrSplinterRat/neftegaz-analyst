@@ -138,17 +138,43 @@ def node_route(state: AgentState) -> AgentState:
 
     try:
         verdict = ask("Ты классификатор запросов. Отвечай одним словом.",
-                      prompts.ROUTER_PROMPT.format(question=question)).lower()
+                      prompts.ROUTER_PROMPT.format(question=question))
     except Exception:  # noqa: BLE001 - classifier failure must not kill the answer
         # Default to the industry branch: answering a cooking question with oil
         # analysis is embarrassing, but refusing a legitimate industry question
         # because the classifier timed out is a broken product.
         return {"route": "industry"}
 
-    for candidate in ("forecast", "industry", "other"):
-        if candidate in verdict:
-            return {"route": candidate}
-    return {"route": "industry"}
+    return {"route": parse_route(verdict)}
+
+
+ROUTE_NAMES = ("forecast", "industry", "other")
+
+
+def parse_route(verdict: str, default: str = "industry") -> str:
+    """Extract the chosen category from a classifier reply.
+
+    Two rules, both learned the hard way:
+
+    * Match whole words, not substrings. "Не forecasting" contains "forecast",
+      and so does a reasoning model listing the options it rejected.
+    * Take the LAST match, not the first. A model that deliberates before
+      answering mentions candidates in the order they appear in the prompt;
+      its actual choice is whatever it says last. Taking the first match makes
+      the answer depend on the order of the option list rather than on the
+      model's decision — which is precisely the defect this replaced: every
+      question routed to "forecast" because that word led the search list and
+      appeared in every monologue.
+
+    The reasoning block is stripped here as well as in `ask`, deliberately.
+    The parser must not depend on another layer having cleaned up first — and
+    a reply truncated mid-monologue keeps its <think> tag unclosed, so the
+    words inside it survive any regex that only removes matched pairs.
+    """
+    from neftegaz.agent.llm import strip_reasoning
+
+    found = re.findall(r"\b(forecast|industry|other)\b", strip_reasoning(verdict).lower())
+    return found[-1] if found else default
 
 
 def node_retrieve(state: AgentState) -> AgentState:
@@ -193,19 +219,15 @@ def node_answer(state: AgentState) -> AgentState:
     report_context = _format_report_context(state.get("report_hits") or [])
     web_context = _format_web_context(state.get("web_hits") or [])
 
+    # The calculation is a first-class source — reproducible, unlike the web —
+    # but it is a source of a *different kind*, so it gets its own section and
+    # its own citation format rather than being folded into the report context.
     forecast_text = state.get("forecast_text", "")
-    if forecast_text:
-        # The calculation is a first-class source: it is reproducible, unlike
-        # the web, so it is presented to the model as verified ground truth.
-        report_context = (
-            f"[расчётный модуль прогнозирования — результат собственного расчёта]\n{forecast_text}"
-            + (f"\n\n{report_context}" if report_context else "")
-        )
 
     try:
         answer = ask(
             prompts.SYSTEM_PROMPT,
-            prompts.build_answer_prompt(question, report_context, web_context),
+            prompts.build_answer_prompt(question, report_context, web_context, forecast_text),
         )
     except Exception as exc:  # noqa: BLE001
         # Degrade to the raw material rather than losing the work: a forecast
