@@ -37,7 +37,7 @@ NUMBER = re.compile(r"\d+\.\d+")
 # Любая законная разметка источника. Расчёт и веб проверить по корпусу нельзя,
 # но их НАЛИЧИЕ проверить можно и нужно: число без всякой ссылки — отдельный и
 # худший отказ, чем число со ссылкой на не ту страницу.
-ANY_MARK = re.compile(r"\[(?:Отчёт|Расчёт|Источник|Веб-источник)")
+ANY_MARK = re.compile(r"\[(Отчёт|Расчёт|Источник|Веб-источник)")
 
 # Ответ агента внутри демо-файла. Ниже идут служебные разделы («Что происходило
 # внутри», список фрагментов с косинусами) — там числа законно стоят без ссылок,
@@ -45,10 +45,24 @@ ANY_MARK = re.compile(r"\[(?:Отчёт|Расчёт|Источник|Веб-и�
 ANSWER = re.compile(r"### Ответ агента\n(.*?)\n---\n", re.S)
 
 
+# Дословный вывод расчётного модуля, записанный в тот же файл. Числа прогноза
+# в корпусе отчётов отсутствуют по природе — они посчитаны, а не процитированы,
+# — но перенос числа ИЗ вывода инструмента В текст ответа проверить можно, и
+# ★именно на этом шаге модель и ошибается: считает не она, а переписывает она.
+# Проверяется перенос, не правильность расчёта; последнюю проверяют тесты
+# расчётного модуля, и смешивать эти два утверждения нельзя.
+TOOL_OUTPUT = re.compile(r"#### Выход расчётного модуля\s*```(.*?)```", re.S)
+
+
 def answer_of(text: str) -> str:
     """Раздел с ответом, если файл — демо; иначе весь текст."""
     found = ANSWER.search(text)
     return found.group(1) if found else text
+
+
+def tool_output_of(text: str) -> str:
+    found = TOOL_OUTPUT.search(text)
+    return normalise(found.group(1)) if found else ""
 
 
 def blocks(text: str) -> list[str]:
@@ -107,8 +121,17 @@ def main() -> int:
     print(f"корпус: {len(pages)} страниц, ответов: {len(answers)}")
 
     checked = missing = unmarked = 0
+    per_answer: list[tuple[str, int, int, int, set]] = []
     for answer in answers:
-        for line in blocks(answer_of(answer.read_text(encoding="utf-8"))):
+        # Счётчики этого ответа: итог по каждому сценарию отдельно нужен потому,
+        # что общая сумма скрывает, ГДЕ именно нечего было проверять. Ответ, в
+        # котором чисел нет вовсе, и ответ, все числа которого подтверждены, в
+        # сумме выглядят одинаково, а это разные состояния.
+        here_checked = here_missing = here_unmarked = 0
+        sources: set = set()
+        body = answer.read_text(encoding="utf-8")
+        computed = tool_output_of(body)
+        for line in blocks(answer_of(body)):
             # ★Сначала — есть ли ссылка вообще. Абзац с числами и без всякой
             # разметки читается как собственное мнение системы; проверить его
             # читатель не может, а проверяемость и есть предмет поставки. Код в
@@ -117,14 +140,27 @@ def main() -> int:
             digits = NUMBER.findall(line)
             if digits and not ANY_MARK.search(line) and "```" not in line:
                 unmarked += len(digits)
+                here_unmarked += len(digits)
                 print(f"  ✗ {answer.name}: числа {digits} стоят без ссылки: "
                       f"«{re.sub(r'[\\s ]+', ' ', line)[:70]}…»")
+            for mark in ANY_MARK.finditer(line):
+                sources.add(mark.group(1))
             # ★ССЫЛОК В СТРОКЕ МОЖЕТ БЫТЬ НЕСКОЛЬКО, и число засчитывается, если
             # оно стоит хоть на одной из названных страниц. Первая редакция
             # брала только первую ссылку и объявила 15 ложных тревог на строке
             # вида «в июле … , а в апреле … [Отчёт июль], [Отчёт апрель]»:
             # апрельские числа сверялись с июльскими страницами. Я едва не
             # доложил дефект проверки как дефект продукта.
+            # Числа расчёта сверяются с записанным выводом инструмента.
+            if "[Расчёт" in line and computed:
+                for number in NUMBER.findall(line):
+                    checked += 1
+                    here_checked += 1
+                    if number not in computed:
+                        missing += 1
+                        here_missing += 1
+                        print(f"  ✗ {answer.name}: {number} нет в выводе расчётного модуля")
+
             citations = list(CITATION.finditer(line))
             if not citations:
                 continue
@@ -138,13 +174,34 @@ def main() -> int:
             if not haystack.strip():
                 print(f"  ✗ {answer.name}: страниц {', '.join(named)} в корпусе нет")
                 missing += 1
+                here_missing += 1
                 continue
             for number in NUMBER.findall(line):
                 checked += 1
+                here_checked += 1
                 if number not in haystack:
                     missing += 1
+                    here_missing += 1
                     print(f"  ✗ {answer.name}: {number} нет ни на одной из {', '.join(named)}")
+        per_answer.append((answer.name, here_checked, here_missing, here_unmarked, sources))
 
+    print()
+    print(f"{'сценарий':<44} {'сверено':>8} {'не подтв.':>10} {'без ссылки':>11}  источники")
+    for name, done, bad, bare, sources in per_answer:
+        # ★ТРИ СОСТОЯНИЯ, А НЕ ДВА. «Нечего проверять» обязано отличаться от
+        # «проверено и чисто»: ответ без единого числа и ответ, все числа
+        # которого подтверждены, в двузначной шкале выглядят одинаково, а это
+        # разные вещи — во втором проверка работала, в первом ей не досталось
+        # работы. Веб-источники непроверяемы по природе: их содержимое живёт в
+        # сети и меняется, и объявить их сверенными было бы неправдой.
+        if bad or bare:
+            verdict = "✗ находка"
+        elif done:
+            verdict = "✓ чисто  "
+        else:
+            verdict = "· нечего "
+        kinds = ", ".join(sorted(sources)) or "—"
+        print(f"{verdict} {name[:34]:<34} {done:>8} {bad:>10} {bare:>11}  {kinds}")
     print(f"\nсверено чисел: {checked}, не подтверждено: {missing}, "
           f"без ссылки: {unmarked}")
     if missing or unmarked:
