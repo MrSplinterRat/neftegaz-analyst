@@ -31,7 +31,19 @@ CITATION = re.compile(r"\[Отчёт\s+([^,\]]+),\s*([а-яё]+\s+\d{4}),\s*с\.
 # Числа, которые вообще имеет смысл сверять: с десятичной частью. Целые вроде
 # «2026» или «95%» — это годы и доли, они стоят в тексте ответа, а не в таблице,
 # и требовать их дословного присутствия значило бы плодить ложные тревоги.
-NUMBER = re.compile(r"\d+\.\d+")
+#
+# ★ЗАПЯТАЯ РАВНОПРАВНА С ТОЧКОЙ. Отчёты английские и пишут «1.3», ответы русские
+# и пишут «1,3». Первая редакция шаблона знала только точку, и все числа
+# русского написания были для проверки НЕВИДИМЫ: сценарий 3 показал «сверено 0»
+# при пятнадцати числах в ответе, и это выглядело как «нечего проверять», а не
+# как слепота. Проверка, не видящая половину написаний, отчитывается о чистоте
+# ровно тем же тоном, что и полная.
+NUMBER = re.compile(r"\d+[.,]\d+")
+
+
+def variants(number: str) -> tuple[str, ...]:
+    """Написания одного и того же числа, которые надо искать в источнике."""
+    return (number.replace(",", "."), number.replace(".", ","))
 
 
 # Любая законная разметка источника. Расчёт и веб проверить по корпусу нельзя,
@@ -43,6 +55,7 @@ ANY_MARK = re.compile(r"\[(Отчёт|Расчёт|Источник|Веб-ис�
 # внутри», список фрагментов с косинусами) — там числа законно стоят без ссылок,
 # и требовать их разметки значило бы плодить ложные тревоги.
 ANSWER = re.compile(r"### Ответ агента\n(.*?)\n---\n", re.S)
+QUESTION = re.compile(r"### Запрос\n(.*?)\n### ", re.S)
 
 
 # Дословный вывод расчётного модуля, записанный в тот же файл. Числа прогноза
@@ -63,6 +76,19 @@ def answer_of(text: str) -> str:
 def tool_output_of(text: str) -> str:
     found = TOOL_OUTPUT.search(text)
     return normalise(found.group(1)) if found else ""
+
+
+def question_of(text: str) -> str:
+    """Вопрос пользователя, как он записан в демо-файле.
+
+    ★Число, которым ответ ПОВТОРЯЕТ вопрос («прогноз при сокращении добычи на
+    1.5 млн барр./сут»), не является утверждением о мире и источника не требует:
+    его источник — спрашивающий, и он у читателя перед глазами. Это не поблажка
+    проверке: утверждение, ДОБАВЛЯЮЩЕЕ число к вопросу, ссылку по-прежнему
+    обязано нести.
+    """
+    found = QUESTION.search(text)
+    return found.group(1) if found else ""
 
 
 def blocks(text: str) -> list[str]:
@@ -86,6 +112,35 @@ def blocks(text: str) -> list[str]:
             current = []
     if current:
         result.append(" ".join(current))
+    return result
+
+
+def segments(block: str) -> list[tuple[str, str | None]]:
+    """Абзац, разрезанный по ссылкам: число принадлежит БЛИЖАЙШЕЙ СЛЕДУЮЩЕЙ.
+
+    ★ЭТО ГЛАВНОЕ МЕСТО ВСЕЙ ПРОВЕРКИ. Итоговый абзац законно смешивает
+    источники: предложение про EIA закрывается ссылкой на отчёт, следующее про
+    ОПЕК — ссылкой на веб. Прежняя редакция брала абзац целиком и сверяла ВСЕ
+    его числа со ВСЕМИ упомянутыми страницами отчётов — и объявила «0,6» и
+    «54,8» неподтверждёнными, хотя они пришли из веба и на страницах отчёта
+    стоять не обязаны. Продукт был прав, груб был инструмент.
+
+    Ссылка закрывает то, что перед ней. Возвращается список (отрезок, вид
+    ссылки); у хвоста после последней ссылки вид ``None`` — числа там не
+    закрыты ничем.
+    """
+    result: list[tuple[str, str | None]] = []
+    previous = 0
+    for mark in ANY_MARK.finditer(block):
+        closing = block.find("]", mark.start())
+        end = closing + 1 if closing != -1 else mark.end()
+        if end <= previous:
+            continue  # вложенная скобка внутри уже разобранной ссылки
+        result.append((block[previous:end], mark.group(1)))
+        previous = end
+    tail = block[previous:]
+    if tail.strip():
+        result.append((tail, None))
     return result
 
 
@@ -120,74 +175,85 @@ def main() -> int:
         return 2
     print(f"корпус: {len(pages)} страниц, ответов: {len(answers)}")
 
-    checked = missing = unmarked = 0
-    per_answer: list[tuple[str, int, int, int, set]] = []
+    checked = missing = unmarked = web = 0
+    per_answer: list[tuple[str, int, int, int, int, set]] = []
     for answer in answers:
         # Счётчики этого ответа: итог по каждому сценарию отдельно нужен потому,
         # что общая сумма скрывает, ГДЕ именно нечего было проверять. Ответ, в
         # котором чисел нет вовсе, и ответ, все числа которого подтверждены, в
         # сумме выглядят одинаково, а это разные состояния.
-        here_checked = here_missing = here_unmarked = 0
+        here_checked = here_missing = here_unmarked = here_web = 0
         sources: set = set()
         body = answer.read_text(encoding="utf-8")
         computed = tool_output_of(body)
-        for line in blocks(answer_of(body)):
-            # ★Сначала — есть ли ссылка вообще. Абзац с числами и без всякой
-            # разметки читается как собственное мнение системы; проверить его
-            # читатель не может, а проверяемость и есть предмет поставки. Код в
-            # блоках ``` — это дословный вывод инструмента, показанный как есть,
-            # и разметки не требует.
-            digits = NUMBER.findall(line)
-            if digits and not ANY_MARK.search(line) and "```" not in line:
-                unmarked += len(digits)
-                here_unmarked += len(digits)
-                print(f"  ✗ {answer.name}: числа {digits} стоят без ссылки: "
-                      f"«{re.sub(r'[\\s ]+', ' ', line)[:70]}…»")
-            for mark in ANY_MARK.finditer(line):
-                sources.add(mark.group(1))
-            # ★ССЫЛОК В СТРОКЕ МОЖЕТ БЫТЬ НЕСКОЛЬКО, и число засчитывается, если
-            # оно стоит хоть на одной из названных страниц. Первая редакция
-            # брала только первую ссылку и объявила 15 ложных тревог на строке
-            # вида «в июле … , а в апреле … [Отчёт июль], [Отчёт апрель]»:
-            # апрельские числа сверялись с июльскими страницами. Я едва не
-            # доложил дефект проверки как дефект продукта.
-            # Числа расчёта сверяются с записанным выводом инструмента.
-            if "[Расчёт" in line and computed:
-                for number in NUMBER.findall(line):
-                    checked += 1
-                    here_checked += 1
-                    if number not in computed:
-                        missing += 1
-                        here_missing += 1
-                        print(f"  ✗ {answer.name}: {number} нет в выводе расчётного модуля")
+        asked = question_of(body)
+        for block in blocks(answer_of(body)):
+            if "```" in block:
+                continue  # дословный вывод инструмента, показанный как есть
+            for segment, kind in segments(block):
+                digits = NUMBER.findall(segment)
+                if not digits:
+                    continue
+                for mark in ANY_MARK.finditer(segment):
+                    sources.add(mark.group(1))
 
-            citations = list(CITATION.finditer(line))
-            if not citations:
-                continue
-            haystack = ""
-            named = []
-            for citation in citations:
-                _source, date, first, last = citation.groups()
-                named.append(f"{date} с.{first}" + (f"-{last}" if last else ""))
-                for number in range(int(first), int(last or first) + 1):
-                    haystack += " " + pages.get((date, number), "")
-            if not haystack.strip():
-                print(f"  ✗ {answer.name}: страниц {', '.join(named)} в корпусе нет")
-                missing += 1
-                here_missing += 1
-                continue
-            for number in NUMBER.findall(line):
-                checked += 1
-                here_checked += 1
-                if number not in haystack:
+                # ★Хвост без ссылки. Абзац с числами и без всякой разметки
+                # читается как собственное мнение системы; проверить его
+                # читатель не может, а проверяемость и есть предмет поставки.
+                if kind is None:
+                    echoed = [d for d in digits
+                              if any(f in asked for f in variants(d))]
+                    bare = [d for d in digits if d not in echoed]
+                    if not bare:
+                        continue  # ответ лишь повторил числа вопроса
+                    unmarked += len(bare)
+                    here_unmarked += len(bare)
+                    print(f"  ✗ {answer.name}: числа {bare} стоят без ссылки: "
+                          f"«{re.sub(r'[\\s ]+', ' ', segment)[:70]}…»")
+                    continue
+
+                # ★Веб непроверяем ПО ПРИРОДЕ: страница живёт в сети и меняется.
+                # Считать такие числа «сверенными» было бы неправдой, а считать
+                # «непод­тверждёнными» — клеветой. Им нужен свой столбец.
+                if kind in ("Источник", "Веб-источник"):
+                    web += len(digits)
+                    here_web += len(digits)
+                    continue
+
+                if kind == "Расчёт":
+                    haystack, named = computed, "выводе расчётного модуля"
+                else:
+                    citations = list(CITATION.finditer(segment))
+                    if not citations:
+                        continue
+                    haystack = ""
+                    pieces = []
+                    for citation in citations:
+                        _source, date, first, last = citation.groups()
+                        pieces.append(f"{date} с.{first}" + (f"-{last}" if last else ""))
+                        for number in range(int(first), int(last or first) + 1):
+                            haystack += " " + pages.get((date, number), "")
+                    named = ", ".join(pieces)
+                if not haystack.strip():
+                    print(f"  ✗ {answer.name}: источник ({named}) недоступен для сверки")
                     missing += 1
                     here_missing += 1
-                    print(f"  ✗ {answer.name}: {number} нет ни на одной из {', '.join(named)}")
-        per_answer.append((answer.name, here_checked, here_missing, here_unmarked, sources))
+                    continue
+                for number in digits:
+                    checked += 1
+                    here_checked += 1
+                    if not any(form in haystack for form in variants(number)):
+                        missing += 1
+                        here_missing += 1
+                        print(f"  ✗ {answer.name}: {number} нет в {named}")
+        per_answer.append(
+            (answer.name, here_checked, here_missing, here_unmarked, here_web, sources)
+        )
 
     print()
-    print(f"{'сценарий':<44} {'сверено':>8} {'не подтв.':>10} {'без ссылки':>11}  источники")
-    for name, done, bad, bare, sources in per_answer:
+    print(f"{'сценарий':<44} {'сверено':>8} {'не подтв.':>10} {'без ссылки':>11} "
+          f"{'веб':>5}  источники")
+    for name, done, bad, bare, from_web, sources in per_answer:
         # ★ТРИ СОСТОЯНИЯ, А НЕ ДВА. «Нечего проверять» обязано отличаться от
         # «проверено и чисто»: ответ без единого числа и ответ, все числа
         # которого подтверждены, в двузначной шкале выглядят одинаково, а это
@@ -201,9 +267,10 @@ def main() -> int:
         else:
             verdict = "· нечего "
         kinds = ", ".join(sorted(sources)) or "—"
-        print(f"{verdict} {name[:34]:<34} {done:>8} {bad:>10} {bare:>11}  {kinds}")
+        print(f"{verdict} {name[:34]:<34} {done:>8} {bad:>10} {bare:>11} "
+              f"{from_web:>5}  {kinds}")
     print(f"\nсверено чисел: {checked}, не подтверждено: {missing}, "
-          f"без ссылки: {unmarked}")
+          f"без ссылки: {unmarked}, из веба (непроверяемо): {web}")
     if missing or unmarked:
         return 1
     # ★Ноль сверенных — не успех. Пустая проверка выдала бы «всё чисто» ровно
