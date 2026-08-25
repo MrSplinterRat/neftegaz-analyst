@@ -44,6 +44,12 @@ class ForecastReport:
     horizon_days: int
     method: str
     last_price: float
+    # Дата последнего наблюдения едет вместе с ценой намеренно. История лежит
+    # в CSV, который обновляется отдельным скриптом, и цена без даты читается
+    # как «цена сейчас» — а она может быть недельной давности. Дата делает
+    # утверждение проверяемым и переводит вопрос свежести данных из
+    # незаметного в явный.
+    last_date: str
     point: float
     lower: float
     upper: float
@@ -54,7 +60,8 @@ class ForecastReport:
     def as_text(self) -> str:
         lines = [
             f"Инструмент: {self.instrument}",
-            f"Последняя известная цена: {self.last_price:.2f} долл./барр.",
+            f"Последняя известная цена: {self.last_price:.2f} долл./барр. "
+            f"(последнее наблюдение в истории: {self.last_date})",
             f"Горизонт: {self.horizon_days} дн.",
             f"Метод: {self.method}",
             f"Прогноз на конец горизонта: {self.point:.2f} долл./барр.",
@@ -136,6 +143,9 @@ def run_forecast(
         horizon_days=horizon_days,
         method=result.method,
         last_price=float(series.iloc[-1]),
+        # load_prices гарантирует DatetimeIndex, поэтому последняя метка —
+        # это дата последней строки файла, а не заполненный выходной.
+        last_date=series.index[-1].date().isoformat(),
         point=float(last_row["forecast"]),
         lower=float(last_row["lower"]),
         upper=float(last_row["upper"]),
