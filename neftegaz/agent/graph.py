@@ -101,6 +101,46 @@ def parse_supply_change(question: str) -> float:
     return -magnitude if is_cut else magnitude
 
 
+# ★БЮДЖЕТ КОНТЕКСТА В ЗНАКАХ, А НЕ НАДЕЖДА НА ТО, ЧТО ВЛЕЗЕТ.
+#
+# Замер 26.08: на вопросе «сопоставь прогноз EIA с текущими котировками»
+# сервер модели ответил 500 context_length_exceeded, и агент выродился в
+# свалку сырых фрагментов вместо ответа. Пять фрагментов отчётов по ~1400
+# знаков плюс пять веб-выдержек плюс задание перевалили за окно.
+#
+# ★ЛЕЧИТЬ УВЕЛИЧЕНИЕМ ОКНА НЕЛЬЗЯ: сколько его ни дай, число найденного
+# умножается на длину найденного, и обе величины растут от настроек поиска.
+# Единственная защита — потолок, который держит СОБИРАЮЩАЯ сторона.
+#
+# Урезается ХВОСТ, потому что попадания приходят по убыванию близости:
+# первым выпадает наименее подходящее. Обрезанный фрагмент помечается явно —
+# модель должна отличать «в отчёте этого нет» от «сюда не поместилось».
+REPORT_BUDGET_CHARS = 7000
+WEB_BUDGET_CHARS = 4000
+FRAGMENT_CAP_CHARS = 1800
+TRUNCATION_MARK = "\n[…фрагмент обрезан по бюджету контекста]"
+
+
+def _fit(blocks: list[str], budget: int) -> list[str]:
+    """Оставить столько блоков с начала, сколько влезает в бюджет знаков."""
+    kept: list[str] = []
+    spent = 0
+    for block in blocks:
+        if spent + len(block) > budget:
+            break
+        kept.append(block)
+        spent += len(block)
+    # Хотя бы один блок отдаётся всегда: пустой контекст превратил бы ответ по
+    # источникам в ответ по памяти модели, а это худший исход, чем усечение.
+    if not kept and blocks:
+        kept = [blocks[0][:budget] + TRUNCATION_MARK]
+    return kept
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= FRAGMENT_CAP_CHARS else text[:FRAGMENT_CAP_CHARS] + TRUNCATION_MARK
+
+
 def _format_report_context(hits: list[Any]) -> str:
     """Render retrieved chunks with the metadata the citation format needs."""
     blocks = []
@@ -121,18 +161,18 @@ def _format_report_context(hits: list[Any]) -> str:
             marks = [f"таблица: {caption}"] if caption else []
             if columns:
                 marks.append(f"колонки по порядку: {columns}")
-            blocks.append(f"{header}\n[{' | '.join(marks)}]\n{hit.text}")
+            blocks.append(f"{header}\n[{' | '.join(marks)}]\n{_clip(hit.text)}")
         else:
-            blocks.append(f"{header}\n{hit.text}")
-    return "\n\n".join(blocks)
+            blocks.append(f"{header}\n{_clip(hit.text)}")
+    return "\n\n".join(_fit(blocks, REPORT_BUDGET_CHARS))
 
 
 def _format_web_context(hits: list[Any]) -> str:
     blocks = []
     for hit in hits:
         mark = " (отраслевой/агентский источник)" if hit.preferred else ""
-        blocks.append(f"[веб: {hit.title} — {hit.domain}{mark}]\n{hit.snippet}\n{hit.url}")
-    return "\n\n".join(blocks)
+        blocks.append(f"[веб: {hit.title} — {hit.domain}{mark}]\n{_clip(hit.snippet)}\n{hit.url}")
+    return "\n\n".join(_fit(blocks, WEB_BUDGET_CHARS))
 
 
 # ── nodes ──────────────────────────────────────────────────────────────────

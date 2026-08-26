@@ -941,3 +941,43 @@ def test_chunk_never_spans_a_table_caption():
                 f"фрагмент пересёк заголовок {match.group()!r} на позиции "
                 f"{match.start()}, начавшись с {text[:40]!r}"
             )
+
+
+def test_context_fits_the_budget_and_says_when_it_was_cut():
+    """★Контекст держится в потолке знаков, и усечение помечено.
+
+    Замер 26.08: на вопросе про сопоставление прогноза с котировками сервер
+    модели ответил 500 context_length_exceeded, и агент выродился в свалку
+    сырых фрагментов. Проверка двусторонняя: с бюджетом впору — не режем и
+    метки не ставим; заведомо больше бюджета — режем и метку ставим.
+    """
+    from neftegaz.agent.graph import (
+        REPORT_BUDGET_CHARS,
+        TRUNCATION_MARK,
+        _format_report_context,
+    )
+
+    class FakeHit:
+        def __init__(self, text, index):
+            self.text = text
+            self.source_name = "EIA STEO"
+            self.date = "июль 2026"
+            self.page = 10 + index
+            self.page_end = 10 + index
+            self.score = 0.9 - index / 100
+            self.context = "Table 2. Energy Prices"
+
+    small = [FakeHit("Brent Spot Average 75.83 68.01\n" * 4, i) for i in range(3)]
+    rendered = _format_report_context(small)
+    assert len(rendered) <= REPORT_BUDGET_CHARS
+    assert TRUNCATION_MARK not in rendered
+    assert rendered.count("[фрагмент:") == 3, "короткие фрагменты обрезать не за что"
+
+    huge = [FakeHit("x" * 4000, i) for i in range(8)]
+    rendered = _format_report_context(huge)
+    assert len(rendered) <= REPORT_BUDGET_CHARS + len(TRUNCATION_MARK) * 8
+    assert TRUNCATION_MARK in rendered, "усечение обязано быть видно модели"
+    assert rendered.count("[фрагмент:") < 8, "часть фрагментов обязана отсеяться"
+    # ★Пустого контекста быть не должно ни при каком бюджете: он превратил бы
+    # ответ по источникам в ответ по памяти модели.
+    assert _format_report_context([FakeHit("y" * 50000, 0)]).strip()
