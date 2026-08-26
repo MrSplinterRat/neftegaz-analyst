@@ -28,3 +28,6 @@ venv/
 demo.before-*/
 *.bak
 *.bak-*
+
+# Сгенерированный показ README/ОТЧЁТ в HTML — продукт, не рукопись.
+html/
