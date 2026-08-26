@@ -13,10 +13,15 @@
 
 ```bash
 docker build -t neftegaz-analyst .
-docker run -p 8501:8501 -v "$PWD/data:/app/data" neftegaz-analyst
+docker run -p 8501:8501 --user "$(id -u):$(id -g)" \
+  -v "$PWD/data:/app/data" neftegaz-analyst
 ```
 
 Интерфейс: <http://localhost:8501>
+
+`--user` нужен потому, что образ работает от непривилегированного `uid 1000`,
+а смонтированный `data/` принадлежит вам: без него Qdrant не откроет свой файл
+блокировки. Команда запуска с полным набором ограничений — в ОТЧЁТ.md, 5.3.
 
 ### Локально
 
