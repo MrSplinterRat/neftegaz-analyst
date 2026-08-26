@@ -88,7 +88,22 @@ def read_pdf_pages(path: str) -> list[dict]:
         # context and hurts embedding quality without carrying meaning.
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
-        pages.append({"page": page.number, "text": text})
+        # ★СТРУКТУРА ТАБЛИЦ ЕДЕТ ДАЛЬШЕ ВМЕСТЕ С ТЕКСТОМ, А НЕ ВЫБРАСЫВАЕТСЯ.
+        #
+        # pdf2xml разбирает шапку по координатам и знает, какой год стоит над
+        # каким кварталом: column_labels() отдаёт ['2025Q1', … '2027Q4', '2025',
+        # '2026', '2027']. Если оставить одну page.text(), эта связь теряется —
+        # в плоском потоке два яруса шапки становятся отдельными строками, и
+        # нарезка, восстанавливающая шапку регулярками, берёт только нижний:
+        # двенадцать безымянных Q1…Q4, по которым нельзя сказать, какого года
+        # квартал. Из плоского текста связь года с кварталом не выводится в
+        # принципе — её нужно не угадывать заново, а донести.
+        tables = [
+            {"caption": table.caption, "columns": table.column_labels()}
+            for table in page.tables
+            if table.caption
+        ]
+        pages.append({"page": page.number, "text": text, "tables": tables})
     return pages
 
 

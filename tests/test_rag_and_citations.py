@@ -199,6 +199,53 @@ def test_row_carries_its_table_caption():
     assert "World Crude Oil Production" in rows[0]["context"]
 
 
+def test_quarter_columns_are_tied_to_their_year():
+    """★Шапка обязана говорить, КАКОГО ГОДА квартал.
+
+    Без этого фрагмент несёт двенадцать безымянных Q1…Q4, и вопрос «что
+    происходит с добычей ОПЕК+» неотвечаем: числа есть, привязать не к чему.
+    Провал во II квартале 2026 неотличим от провала во II квартале 2025.
+
+    Связь года с кварталом живёт в ВЕРХНЕМ ярусе шапки, а он в плоском потоке —
+    отдельная строка. Сопоставить ярусы можно только по x, то есть при разборе;
+    здесь проверяется, что разобранное дошло до фрагмента, а не было
+    восстановлено регулярками заново.
+    """
+    from neftegaz.rag.chunking import chunk_pages as split
+
+    caption = "Table 3d. World Crude Oil Production (million barrels per day)"
+    page = {
+        "page": 38,
+        "text": _ROW_STREAM,
+        # Меток ровно столько, сколько значений в строках потока: шапка иной
+        # ширины отбрасывается намеренно, и тест проверял бы не то.
+        "tables": [{
+            "caption": caption,
+            "columns": ["2025Q1", "2025Q2", "2025Q3", "2025Q4", "2025"],
+        }],
+    }
+    rows = [c for c in split([page], size=200, overlap=40)
+            if c["kind"] == "row" and c["text"].startswith("United States")]
+    assert rows, "строка таблицы не выделилась во фрагмент"
+    header = rows[0]["context"].split("\n")[-1]
+    assert "2025Q2" in header, f"квартал не привязан к году: {header!r}"
+
+
+def test_header_falls_back_when_structure_is_absent():
+    """Без структуры путь не рушится, а отдаёт нижний ярус.
+
+    Страницы без разобранных таблиц — не экзотика: часть таблиц pdf2xml не
+    собирает, и синтетические страницы в тестах структуры не имеют вовсе.
+    Пустая шапка хуже неполной, поэтому запасной разбор остаётся.
+    """
+    from neftegaz.rag.chunking import chunk_pages as split
+
+    rows = [c for c in split([{"page": 7, "text": _ROW_STREAM}], size=200, overlap=40)
+            if c["kind"] == "row" and c["text"].startswith("United States")]
+    assert rows
+    assert "World Crude Oil Production" in rows[0]["context"]
+
+
 # ── filename metadata ──────────────────────────────────────────────────────
 
 

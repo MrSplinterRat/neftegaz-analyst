@@ -242,13 +242,32 @@ def column_header_after(stream: str, position: int) -> str:
     return ""
 
 
-def header_positions(stream: str, captions: list[tuple[int, str]]) -> list[str]:
+def header_positions(
+    stream: str,
+    captions: list[tuple[int, str]],
+    known: dict[str, list[str]] | None = None,
+) -> list[str]:
     """Шапки колонок, по одной на заголовок, в том же порядке.
 
     Как и заголовки, считаются один раз на документ: иначе окно в 400 знаков
     перечитывалось бы для каждого из тысяч фрагментов.
+
+    ★ГОТОВАЯ ШАПКА ПРЕДПОЧТИТЕЛЬНЕЕ ВОССТАНОВЛЕННОЙ. ``known`` — заголовок
+    таблицы → метки колонок, разобранные pdf2xml ПО КООРДИНАТАМ. Они несут
+    привязку квартала к году (``2025Q1``), которой в плоском тексте нет и
+    взяться ей неоткуда: верхний ярус шапки — отдельная строка потока, и
+    сопоставить её с нижним можно только по x, то есть на этапе разбора.
+
+    Разбор регулярками остаётся запасным путём — для таблиц, которых pdf2xml не
+    собрал, и для вызовов, куда структуру не передали (её нет у синтетических
+    страниц в тестах). Он честно отдаёт нижний ярус: хуже полной шапки, лучше
+    пустой.
     """
-    return [column_header_after(stream, start) for start, _ in captions]
+    known = known or {}
+    return [
+        " ".join(known[caption]) if caption in known else column_header_after(stream, start)
+        for start, caption in captions
+    ]
 
 
 def _nearest_caption(captions: list[tuple[int, str]], position: int) -> int:
@@ -363,8 +382,17 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
         page_of_char.extend([page["page"]] * len(text))
     stream = "".join(parts)
 
+    # Заголовок таблицы в потоке и в структуре — один и тот же текст, поэтому
+    # он и служит ключом. Таблица, разбитая на две страницы, даёт одинаковые
+    # метки с обеих: перезапись безвредна.
+    known_columns: dict[str, list[str]] = {}
+    for page in pages:
+        for table in page.get("tables") or ():
+            if table.get("caption") and table.get("columns"):
+                known_columns[table["caption"]] = table["columns"]
+
     captions = caption_positions(stream)
-    headers = header_positions(stream, captions)
+    headers = header_positions(stream, captions, known_columns)
 
     step = size - overlap
     chunks: list[dict] = []
