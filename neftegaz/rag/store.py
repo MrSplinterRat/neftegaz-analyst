@@ -37,6 +37,12 @@ class Hit:
     date: str
     page: int
     page_end: int
+    # ★Заголовок таблицы и шапка её колонок — то, чего в самом фрагменте нет.
+    # Хранится отдельно от text и в цитату не попадает: text обязан дословно
+    # совпадать со страницей отчёта. Но отвечающей модели контекст показывать
+    # НАДО: без него ряд чисел нечитаем, и она честно отвечает «заголовков
+    # колонок не видно». До этого поля контекст доходил только до эмбеддинга.
+    context: str = ""
 
     def as_claim(self, text: str | None = None) -> dict:
         """Shape this hit for :mod:`neftegaz.tools.citations`."""
@@ -486,6 +492,7 @@ class ReportStore:
                     date=payload.get("date", ""),
                     page=int(payload.get("page", 0)),
                     page_end=int(payload.get("page_end", payload.get("page", 0))),
+                    context=payload.get("context", ""),
                 )
             )
             if len(hits) == top_k:

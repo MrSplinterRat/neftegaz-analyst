@@ -23,6 +23,13 @@ __all__ = [
     "chunk_document",
     "caption_before",
     "caption_positions",
+    "column_header_after",
+    "context_outside",
+    "row_context",
+    "values_in_row",
+    "header_positions",
+    "is_column_header",
+    "table_context_before",
     "table_rows",
 ]
 
@@ -80,7 +87,16 @@ class Chunk:
 # идут пять чисел.
 _DOTS = re.compile(r"\.{3,}")
 _NUMBER = re.compile(r"-?[\d,]+(?:\.\d+)?")
-_ROW_VALUES = re.compile(r"\s*(?:(?:-?[\d,]+(?:\.\d+)?|-)[ \t]+){4,}")
+# ★ПОСЛЕДНЕЕ ЗНАЧЕНИЕ СТРОКИ ЗАКАНЧИВАЕТСЯ ПЕРЕВОДОМ СТРОКИ, А НЕ ПРОБЕЛОМ.
+# Требование «за каждым значением идёт пробел или табуляция» отрезало у строки
+# ровно один столбец — последний. Замерено на отчёте за июль 2026: у 903 строк
+# из 938 сразу за концом фрагмента в отчёте стояло ещё одно число. Столбец этот
+# не случайный: в таблицах STEO последняя колонка — годовая, то есть прогноз на
+# 2027 год. Вопросы задают именно о нём.
+_ROW_VALUES = re.compile(r"\s*(?:(?:-?[\d,]+(?:\.\d+)?|-)(?:[ \t]+|(?=\n|$))){4,}")
+
+# Одиночное значение таблицы: число или прочерк на месте отсутствующих данных.
+_VALUE_TOKEN = re.compile(r"^(?:-?[\d,]+(?:\.\d+)?|-)$")
 
 # Насколько далеко назад от точек искать начало подписи.
 ROW_LABEL_WINDOW = 100
@@ -132,6 +148,168 @@ def caption_positions(stream: str) -> list[tuple[int, str]]:
     return [(match.start(), match.group(0).strip()) for match in TABLE_CAPTION.finditer(stream)]
 
 
+# ── шапка колонок ──────────────────────────────────────────────────────────
+# Заголовок называет таблицу, но не говорит, ЧТО ЗНАЧИТ каждое число в строке.
+# Столбцы названы отдельной строкой сразу под заголовком:
+#
+#   Table 3c. World Petroleum and Other Liquid Fuels Production (million barrels per day)
+#   Q1 Q2 Q3 Q4 Q1 Q2 Q3 Q4 Q1 Q2 Q3 Q4 2025 2026 2027
+#   OPEC members subject to OPEC+ agreements ..... 21.55 21.96 22.38 …
+#
+# Без этой строки модель видит ряд чисел и не знает, какому периоду какое
+# принадлежит. Это не догадка: на вопросе про добычу ОПЕК+ она так и ответила —
+# «числа есть, заголовков колонок в фрагменте не видно» — и оговорила единицы
+# как предположение. Строка короткая и дешёвая, а без неё табличный материал
+# отвечает наполовину.
+#
+# ★РАСПОЗНАЁТСЯ ПО СОСТАВУ, А НЕ ПО ПОЛОЖЕНИЮ. «Строка сразу под заголовком»
+# ошибочно: под ним бывает колонтитул «U.S. Energy Information Administration |
+# Short-Term Energy Outlook - July 2026», и он содержит «July 2026». Строка
+# признаётся шапкой, только если ВСЕ её слова — обозначения периодов.
+COLUMN_LABEL = re.compile(
+    r"^(?:Q[1-4]|Year|1[89]\d{2}|20\d{2}"
+    r"|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$",
+    re.IGNORECASE,
+)
+
+# Меньше трёх обозначений — не шапка: две подряд стоящие даты встречаются в
+# прозе, а три и больше в одну строку ставит только таблица.
+MIN_COLUMN_LABELS = 3
+
+# Насколько далеко под заголовком искать первую строку таблицы. Между ними
+# помещаются колонтитул, сноски и строка-раздел, но не половина отчёта.
+HEADER_SEARCH_WINDOW = 6000
+
+# Подряд идущие обозначения периодов. Ищем именно РЯД, а не строку целиком:
+# извлекатель PDF регулярно приклеивает шапку к концу предыдущей фразы —
+# «…Energy Information Administration.Q1 Q2 Q3 Q4 …», — и построчная проверка
+# такую шапку не видит, хотя она есть.
+_COLUMN_RUN = re.compile(
+    r"\b(?:(?:Q[1-4]|Year|(?:19|20)\d{2}"
+    r"|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:[ \t]+|(?=\n|$)))+",
+    re.IGNORECASE,
+)
+
+
+def is_column_header(line: str) -> bool:
+    """Все ли слова строки — обозначения периодов, и есть ли их достаточно."""
+    tokens = line.split()
+    if len(tokens) < MIN_COLUMN_LABELS:
+        return False
+    return all(COLUMN_LABEL.match(token) for token in tokens)
+
+
+def values_in_row(row_text: str) -> int:
+    """Сколько значений несёт строка таблицы: числа и прочерки после выноски."""
+    dots = _DOTS.search(row_text)
+    tail = row_text[dots.end():] if dots else row_text
+    return sum(1 for token in tail.split() if _VALUE_TOKEN.match(token))
+
+
+def column_header_after(stream: str, position: int) -> str:
+    """Шапка колонок таблицы, заголовок которой начинается в ``position``.
+
+    ★ШАПКА СТОИТ НЕПОСРЕДСТВЕННО ПЕРЕД ПЕРВОЙ СТРОКОЙ ТАБЛИЦЫ. Это не догадка о
+    вёрстке, а замер: на отчёте за июль 2026 ряд «Q1 Q2 Q3 Q4 …» отстоит от
+    первой строки на 39–51 знак во всех таблицах, где он вообще извлёкся.
+    Поэтому область поиска — от заголовка до первой строки, а из найденных
+    рядов берётся ПОСЛЕДНИЙ: выше него лежат сноски и годовые полосы.
+
+    ★И ПРИНИМАЕТСЯ, ТОЛЬКО ЕСЛИ НАЗЫВАЕТ СТОЛЬКО СТОЛБЦОВ, СКОЛЬКО В СТРОКЕ
+    ЗНАЧЕНИЙ. Без сверки правило ловит не то: 619 строк из 938 получали «шапку»
+    из четырёх слов «2025 2026 2027 Year» при пятнадцати значениях в строке.
+    Это не шапка, а обрывок годовой полосы, вынесенный извлекателем PDF
+    отдельной строкой. Показать её модели значило бы привязать пятнадцать чисел
+    к четырём периодам, и ответ выглядел бы обычным. Чужая шапка врёт
+    незаметнее чужого заголовка.
+
+    Пустая строка означает, что шапки нет, — законный исход: у части таблиц
+    столбцы названы внутри самих строк, а из части их не извлёк конвертер.
+    """
+    window = stream[position:position + HEADER_SEARCH_WINDOW]
+    spans = table_rows(window)
+    if not spans:
+        return ""
+    first_row = spans[0][0]
+    width = values_in_row(window[first_row:spans[0][1]])
+    if width == 0:
+        return ""
+
+    for run in reversed(list(_COLUMN_RUN.finditer(window, 0, first_row))):
+        candidate = run.group(0).strip()
+        if is_column_header(candidate) and len(candidate.split()) == width:
+            return candidate
+    return ""
+
+
+def header_positions(stream: str, captions: list[tuple[int, str]]) -> list[str]:
+    """Шапки колонок, по одной на заголовок, в том же порядке.
+
+    Как и заголовки, считаются один раз на документ: иначе окно в 400 знаков
+    перечитывалось бы для каждого из тысяч фрагментов.
+    """
+    return [column_header_after(stream, start) for start, _ in captions]
+
+
+def _nearest_caption(captions: list[tuple[int, str]], position: int) -> int:
+    """Индекс ближайшего заголовка не позже ``position``; -1, если такого нет.
+
+    Вынесено, чтобы у заголовка и у шапки был ОДИН ответ на вопрос «к какой
+    таблице относится это место». Разойдись они — фрагмент получил бы заголовок
+    одной таблицы и шапку другой, и заметить это было бы нечем.
+    """
+    from bisect import bisect_right
+
+    return bisect_right([start for start, _ in captions], position) - 1
+
+
+def table_context_before(
+    captions: list[tuple[int, str]], headers: list[str], position: int
+) -> str:
+    """Заголовок таблицы и шапка её колонок для места ``position``.
+
+    Обе части подчиняются одному правилу удалённости: чужая шапка так же врёт,
+    как чужой заголовок, только незаметнее — числа привяжутся к периодам другой
+    таблицы, и ошибка будет выглядеть как обычный ответ.
+    """
+    index = _nearest_caption(captions, position)
+    if index < 0:
+        return ""
+    start, caption = captions[index]
+    if position - start > MAX_CAPTION_DISTANCE:
+        return ""
+    header = headers[index] if index < len(headers) else ""
+    return f"{caption}\n{header}" if header else caption
+
+
+def context_outside(body: str, context: str) -> str:
+    """Часть контекста, которой нет в самом фрагменте.
+
+    Повторять то, что уже лежит в тексте, незачем: удвоенные слова размывают
+    эмбеддинг. Части взвешиваются по отдельности, потому что заголовок и шапка
+    попадают в тело фрагмента независимо друг от друга.
+    """
+    kept = [part for part in context.split("\n") if part and part not in body]
+    return "\n".join(kept)
+
+
+def row_context(row_text: str, context: str) -> str:
+    """Контекст для ОДНОЙ строки таблицы, с поверкой шапки по этой же строке.
+
+    Ширина сверялась при поиске шапки, но по ПЕРВОЙ строке таблицы. Часть строк
+    несёт меньше значений — раздел без данных, показатель, которого нет в
+    квартальном разрезе. Такой строке шапка не подходит, и подставлять её
+    нельзя: пятнадцать периодов над шестью числами читаются как пропуск данных
+    в конце, а на деле смещены все.
+
+    Заголовок таблицы остаётся: он к ширине отношения не имеет.
+    """
+    caption, _, header = context.partition("\n")
+    if header and len(header.split()) != values_in_row(row_text):
+        context = caption
+    return context_outside(row_text, context)
+
+
 def caption_before(captions: list[tuple[int, str]], position: int) -> str:
     """Ближайший заголовок таблицы, начинающийся не позже ``position``.
 
@@ -148,9 +326,7 @@ def caption_before(captions: list[tuple[int, str]], position: int) -> str:
     меньше первого: чужой заголовок хуже отсутствующего — он не просто не
     поможет найти фрагмент, он привяжет числа к чужой таблице.
     """
-    from bisect import bisect_right
-
-    index = bisect_right([start for start, _ in captions], position) - 1
+    index = _nearest_caption(captions, position)
     if index < 0:
         return ""
     start, caption = captions[index]
@@ -188,6 +364,7 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
     stream = "".join(parts)
 
     captions = caption_positions(stream)
+    headers = header_positions(stream, captions)
 
     step = size - overlap
     chunks: list[dict] = []
@@ -196,10 +373,9 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
     while start < total:
         end = min(start + size, total)
         body = stream[start:end]
-        # Заголовок нужен только тем, кто его не содержит: продолжениям таблицы.
-        # Если он уже внутри фрагмента, повтор ничего не добавит эмбеддингу и
-        # лишь размоет его удвоенными словами.
-        caption = caption_before(captions, start)
+        # Заголовок и шапка нужны только тем, кто их не содержит: продолжениям
+        # таблицы. Если они уже внутри фрагмента, повтор ничего не добавит
+        # эмбеддингу и лишь размоет его удвоенными словами.
         chunks.append(
             Chunk(
                 index=len(chunks),
@@ -208,7 +384,7 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
                 end=end,
                 page_start=page_of_char[start],
                 page_end=page_of_char[end - 1],
-                context="" if caption and caption in body else caption,
+                context=context_outside(body, table_context_before(captions, headers, start)),
             ).as_dict()
         )
         if end == total:
@@ -230,7 +406,10 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
                 end=row_end,
                 page_start=page_of_char[row_start],
                 page_end=page_of_char[row_end - 1],
-                context=caption_before(captions, row_start),
+                context=row_context(
+                    stream[row_start:row_end],
+                    table_context_before(captions, headers, row_start),
+                ),
                 kind="row",
             ).as_dict()
         )

@@ -735,3 +735,172 @@ def test_industry_route_does_not_run_the_calculation(monkeypatch):
 
     assert out.get("used_reports") is True
     assert "forecast_text" not in out, "расчёт запустился на вопросе, где его не просили"
+
+
+# ── шапка колонок таблицы ──────────────────────────────────────────────────
+# ★Дефект, ради которого это написано: на вопросе о добыче ОПЕК+ модель ответила,
+# что видит строку «OPEC members subject to OPEC+ agreements» с рядом чисел, но
+# не видит, какому периоду какое число принадлежит, и оговорила единицы как
+# предположение. Заголовок таблицы фрагмент нёс, шапку колонок — нет.
+
+_HEADER_STREAM = (
+    "Table 3c. World Petroleum and Other Liquid Fuels Production (million barrels per day)\n"
+    "U.S. Energy Information Administration | Short-Term Energy Outlook - July 2026\n"
+    "Q1 Q2 Q3 Q4 Q1 Q2 Q3 Q4 Q1 Q2 Q3 Q4 2025 2026 2027\n"
+    "Petroleum and other liquid fuels production (a)\n"
+    "OPEC members subject to OPEC+ agreements (d) ....... 21.55 21.96 22.38 22.78 20.60"
+    " 13.75 17.44 21.51 22.48 22.71 22.83 22.92 22.17 18.33 22.74\n"
+    "United States ...................................... 22.75 23.49 24.10 24.09 23.71"
+    " 24.31 24.25 24.47 24.45 24.89 24.91 25.03 23.61 24.19 24.82\n"
+    "Refinery capacity (e) ........................ 18.4 18.4 18.4 18.5 18.5 18.6\n"
+)
+_COLUMNS = "Q1 Q2 Q3 Q4 Q1 Q2 Q3 Q4 Q1 Q2 Q3 Q4 2025 2026 2027"
+
+
+def _row_named(chunks: list[dict], label: str) -> dict:
+    """Фрагмент-строка, несущая эту подпись.
+
+    Поиск по вхождению, а не по началу текста: у первой строки раздела в
+    подпись затягивается предыдущая строка-заголовок раздела («Petroleum and
+    other liquid fuels production (a)»), потому что граница подписи — последнее
+    число предыдущей строки, а чисел в ней нет.
+    """
+    found = [c for c in chunks if c["kind"] == "row" and label in c["text"]]
+    assert found, f"строка {label!r} не стала отдельным фрагментом"
+    return found[0]
+
+
+def test_row_carries_the_column_header_not_only_the_caption():
+    chunks = chunk_pages([{"page": 31, "text": _HEADER_STREAM}], size=200, overlap=40)
+    row = _row_named(chunks, "OPEC members subject")
+
+    assert "World Petroleum" in row["context"], "потерян заголовок таблицы"
+    assert _COLUMNS in row["context"], "потеряна шапка колонок — числа снова безымянны"
+
+
+def test_running_header_is_not_mistaken_for_the_column_header():
+    """★Отрицательный контроль: шапка узнаётся по составу, а не по положению.
+
+    Сразу под заголовком таблицы стоит колонтитул, и в нём есть «July 2026».
+    Правило «строка сразу под заголовком» взяло бы его, и фрагмент получил бы
+    вместо периодов название бюллетеня — ошибку, которую нечем заметить.
+    """
+    from neftegaz.rag.chunking import is_column_header
+
+    assert not is_column_header(
+        "U.S. Energy Information Administration | Short-Term Energy Outlook - July 2026"
+    )
+    assert is_column_header(_COLUMNS)
+
+    chunks = chunk_pages([{"page": 31, "text": _HEADER_STREAM}], size=200, overlap=40)
+    assert "Short-Term Energy Outlook" not in _row_named(chunks, "United States")["context"]
+
+
+def test_data_row_is_not_mistaken_for_a_column_header():
+    """Числа таблицы — не обозначения периодов, даже когда их много."""
+    from neftegaz.rag.chunking import is_column_header
+
+    assert not is_column_header("21.55 21.96 22.38 22.78 20.60")
+    assert not is_column_header("- - 1.38 - -")
+
+
+def test_two_dates_in_a_line_are_not_a_column_header():
+    """Порог в три обозначения: пара дат встречается и в прозе."""
+    from neftegaz.rag.chunking import is_column_header
+
+    assert not is_column_header("2025 2026")
+    assert is_column_header("2025 2026 2027")
+
+
+def test_column_header_of_a_distant_table_is_not_borrowed():
+    """★Чужая шапка врёт незаметнее чужого заголовка.
+
+    Заголовок чужой таблицы виден в ответе и вызывает вопрос. Чужая шапка
+    молча привяжет числа к периодам другой таблицы, и ответ будет выглядеть
+    обычным. Правило удалённости у них поэтому одно.
+    """
+    from neftegaz.rag.chunking import MAX_CAPTION_DISTANCE, caption_positions, header_positions
+    from neftegaz.rag.chunking import table_context_before
+
+    stream = _HEADER_STREAM + "x" * (MAX_CAPTION_DISTANCE + 100)
+    captions = caption_positions(stream)
+    headers = header_positions(stream, captions)
+
+    assert _COLUMNS in table_context_before(captions, headers, 200)
+    assert table_context_before(captions, headers, len(stream) - 1) == ""
+
+
+def test_context_already_present_in_the_body_is_not_repeated():
+    """Удвоенные слова размывают эмбеддинг; части взвешиваются по отдельности."""
+    from neftegaz.rag.chunking import context_outside
+
+    assert context_outside(f"хвост {_COLUMNS} хвост", f"Table 3c. X\n{_COLUMNS}") == "Table 3c. X"
+    assert context_outside("числа без слов", f"Table 3c. X\n{_COLUMNS}") == f"Table 3c. X\n{_COLUMNS}"
+
+
+def test_answering_prompt_shows_the_table_context_and_keeps_text_verbatim():
+    """★Контекст обязан дойти до ОТВЕЧАЮЩЕЙ модели, а не только до эмбеддинга.
+
+    Раньше context участвовал лишь в вычислении вектора. Найденный фрагмент
+    доезжал до модели голым рядом чисел — то есть починка нарезки без этого
+    шага не изменила бы ответ ни на слово.
+    """
+    from neftegaz.agent.graph import _format_report_context
+    from neftegaz.rag.store import Hit
+
+    row = "OPEC members subject to OPEC+ agreements (d) ....... 21.55 21.96"
+    hit = Hit(text=row, score=0.71, source_name="EIA STEO", date="июль 2026",
+              page=31, page_end=31, context=f"Table 3c. World Petroleum\n{_COLUMNS}")
+    rendered = _format_report_context([hit])
+
+    assert "Table 3c. World Petroleum" in rendered
+    assert _COLUMNS in rendered
+    assert row in rendered, "текст фрагмента обязан ехать дословно"
+    assert f"{_COLUMNS}\n{row}" not in rendered, "контекст склеился с текстом цитаты"
+
+
+def test_last_value_of_a_row_is_not_dropped():
+    """★Последний столбец строки — годовой, то есть прогноз на дальний год.
+
+    Требование «за каждым значением идёт пробел» отрезало ровно одно значение:
+    то, за которым стоит перевод строки. Замерено на отчёте за июль 2026 — 903
+    строки из 938. Спрашивают именно про этот столбец.
+    """
+    from neftegaz.rag.chunking import table_rows
+
+    stream = "United States ....... 22.75 23.49 24.10 24.09 24.82\nСледующая строка\n"
+    spans = table_rows(stream)
+    assert spans, "строка таблицы не распознана"
+    assert stream[spans[0][0]:spans[0][1]].rstrip().endswith("24.82")
+
+
+def test_narrow_row_does_not_get_the_wide_header():
+    """★Шапка поверяется по КАЖДОЙ строке, а не только по первой строке таблицы.
+
+    Пятнадцать периодов над шестью числами читаются как «данных в конце нет»,
+    а на деле смещены все. Заголовок таблицы при этом остаётся: к ширине он
+    отношения не имеет.
+    """
+    chunks = chunk_pages([{"page": 31, "text": _HEADER_STREAM}], size=200, overlap=40)
+    narrow = _row_named(chunks, "Refinery capacity")
+
+    assert "World Petroleum" in narrow["context"], "заголовок таблицы потерян зря"
+    assert _COLUMNS not in narrow["context"], "широкая шапка приклеена к узкой строке"
+
+
+def test_header_glued_to_the_preceding_sentence_is_still_found():
+    """★Извлекатель PDF склеивает шапку с концом предыдущей фразы.
+
+    В отчётах это выглядит как «…Energy Information Administration.Q1 Q2 Q3 Q4
+    …». Проверка по строке целиком такую шапку не видит, хотя она есть, — ищем
+    РЯД обозначений, а не строку.
+    """
+    from neftegaz.rag.chunking import column_header_after
+
+    stream = (
+        "Table 2. Energy Prices (dollars per barrel)\n"
+        "Weather forecasts from National Oceanic and Atmospheric Administration"
+        " and Energy Information Administration.Q1 Q2 Q3 2025\n"
+        "West Texas Intermediate Spot Average ....... 71.85 64.63 65.78 65.40\n"
+    )
+    assert column_header_after(stream, 0) == "Q1 Q2 Q3 2025"

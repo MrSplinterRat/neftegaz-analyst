@@ -110,7 +110,20 @@ def _format_report_context(hits: list[Any]) -> str:
             + (f"–{hit.page_end}" if hit.page_end != hit.page else "")
             + f", близость {hit.score:.3f}]"
         )
-        blocks.append(f"{header}\n{hit.text}")
+        # ★Контекст таблицы идёт ОТДЕЛЬНОЙ строкой, а не приклеивается к тексту.
+        # Строка таблицы без него — просто ряд чисел: модель не знает ни того,
+        # что это за таблица, ни какому периоду принадлежит каждое значение, и
+        # честно об этом пишет. Склеить его с text нельзя: на text стоит ссылка
+        # на страницу, и он обязан совпадать с отчётом дословно.
+        context = (getattr(hit, "context", "") or "").strip()
+        if context:
+            caption, _, columns = context.partition("\n")
+            marks = [f"таблица: {caption}"] if caption else []
+            if columns:
+                marks.append(f"колонки по порядку: {columns}")
+            blocks.append(f"{header}\n[{' | '.join(marks)}]\n{hit.text}")
+        else:
+            blocks.append(f"{header}\n{hit.text}")
     return "\n\n".join(blocks)
 
 
