@@ -904,3 +904,40 @@ def test_header_glued_to_the_preceding_sentence_is_still_found():
         "West Texas Intermediate Spot Average ....... 71.85 64.63 65.78 65.40\n"
     )
     assert column_header_after(stream, 0) == "Q1 Q2 Q3 2025"
+
+
+def test_chunk_never_spans_a_table_caption():
+    """★Фрагмент не пересекает заголовок таблицы.
+
+    Без этого правила окно начинается в сносках одной таблицы и продолжается
+    числами следующей, а подпись ему выбирается по НАЧАЛУ — и приезжает чужая.
+    Замер по корпусу до починки: 173 фрагмента из 9456 несли подпись, не
+    совпадающую с таблицей, чьи цифры в них лежат.
+
+    Проверка двусторонняя по построению: страница составлена так, что при
+    старом правиле граница ОБЯЗАНА была пройти сквозь заголовок — хвост первой
+    таблицы длиннее шага окна, но короче его размера.
+    """
+    from neftegaz.rag.chunking import TABLE_CAPTION, chunk_pages
+
+    first = "Table 1. Crude Oil Prices\n" + "Brent Spot Average 75.83 68.01 69.00\n" * 12
+    tail = "Notes: values are annual averages.\n" * 6
+    second = "Table 2. Energy Prices\n" + "Propane Residential 2.71 2.48 2.64\n" * 40
+    pages = [{"page": 1, "text": first + tail + second}]
+
+    chunks = chunk_pages(pages, size=1200, overlap=200)
+    windows = [c for c in chunks if c.get("kind") != "row"]
+    assert len(windows) > 1, "страница должна разрезаться, иначе тест ничего не проверяет"
+
+    for chunk in windows:
+        text = chunk["text"]
+        offset = len(text) - len(text.lstrip())
+        for match in TABLE_CAPTION.finditer(text):
+            # Заголовок внутри допустим ровно в одном случае: фрагмент с него
+            # начат. ★Проверяется КАЖДОЕ вхождение, а не первое: у фрагмента,
+            # который начинается своим заголовком и втягивает следующий,
+            # первое вхождение стоит на месте и ничего не ловит.
+            assert match.start() == offset, (
+                f"фрагмент пересёк заголовок {match.group()!r} на позиции "
+                f"{match.start()}, начавшись с {text[:40]!r}"
+            )
