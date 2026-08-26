@@ -17,9 +17,16 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    # fastembed кэширует ONNX-модель сюда; в томе data она переживёт
-    # пересоздание контейнера и не будет качаться заново.
-    FASTEMBED_CACHE_PATH=/app/data/.fastembed
+    # Кэш модели эмбеддингов — в томе data, чтобы он пережил пересоздание
+    # контейнера и модель не качалась заново.
+    #
+    # Обе переменные обязательны, и роли у них разные — проверено смоуком.
+    # FASTEMBED_CACHE_PATH принимает саму модель (241 МБ). HF_HOME принимает
+    # служебный буфер загрузчика huggingface_hub; без него буфер метит в $HOME,
+    # а под --read-only запись туда запрещена, и загрузка падает с
+    # «Read-only file system» ещё до того, как модель начнёт сохраняться.
+    FASTEMBED_CACHE_PATH=/app/data/.fastembed \
+    HF_HOME=/app/data/.hf
 
 WORKDIR /app
 
