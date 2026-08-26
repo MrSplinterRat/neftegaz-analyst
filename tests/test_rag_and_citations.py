@@ -663,3 +663,75 @@ def test_disqualification_agrees_with_the_penalty_it_mirrors():
     assert not carries_no_data(data_row)
     # тот же признак в другой валюте: наказан — значит и дисквалифицирован
     assert rerank_score(axis_page, 0.70) < 0.70
+
+
+# ── маршрут прогноза обязан спрашивать корпус ──────────────────────────────
+
+
+def _graph_with_stub_nodes(monkeypatch, route: str, report_hits: list):
+    """Собрать граф из подменённых узлов: проверяем РЁБРА, а не содержимое.
+
+    Узлы подменяются до сборки, потому что LangGraph забирает функцию в момент
+    add_node: подмена после компиляции не дошла бы до графа и тест был бы
+    зелёным при любом устройстве рёбер.
+    """
+    from neftegaz.agent import graph as G
+
+    monkeypatch.setattr(G, "node_route", lambda state: {"route": route})
+    monkeypatch.setattr(G, "node_forecast", lambda state: {"forecast_text": "РАСЧЁТ"})
+    monkeypatch.setattr(
+        G, "node_retrieve",
+        lambda state: {"report_hits": list(report_hits), "used_reports": bool(report_hits)},
+    )
+    monkeypatch.setattr(G, "node_web", lambda state: {"web_hits": ["веб"], "used_web": True})
+    monkeypatch.setattr(
+        G, "node_answer",
+        lambda state: {"answer": "|".join(sorted(k for k in state if k != "question"))},
+    )
+    return G.build_graph()
+
+
+def test_forecast_route_still_consults_the_report_corpus(monkeypatch):
+    """★Ветка прогноза обязана пройти через корпус отчётов.
+
+    Дефект, ради которого написан тест: вопрос «какой прогноз EIA по Brent на
+    2027 год» классификатор относит к прогнозу, и граф уходил прямо в свой
+    расчёт, отвечая «в базе отчётов ничего не найдено». Между тем поиск по
+    тому же вопросу возвращает фрагменты с близостью 0.72 при пороге 0.55, и
+    нужная таблица STEO в корпусе есть.
+
+    Требование 2.4 говорит о приоритете источников, а не о выборе одного из
+    них: собственный расчёт дополняет отчёты и не заменяет их.
+    """
+    app = _graph_with_stub_nodes(monkeypatch, "forecast", ["ф1", "ф2", "ф3", "ф4", "ф5"])
+    out = app.invoke({"question": "Какой прогноз EIA по ценам на Brent в 2027 году?"})
+
+    assert out.get("used_reports") is True, "ветка прогноза прошла мимо корпуса отчётов"
+    assert out.get("forecast_text") == "РАСЧЁТ", "расчётный модуль перестал работать"
+
+
+def test_forecast_route_falls_through_to_web_when_the_corpus_is_thin(monkeypatch):
+    """Правило приоритета источников не отменяется веткой прогноза.
+
+    Отрицательный контроль к тесту выше: если бы корпус подключили в обход
+    условия `_after_retrieve`, веб не запускался бы никогда и разница между
+    полной и пустой выдачей корпуса стала бы невидимой.
+    """
+    app = _graph_with_stub_nodes(monkeypatch, "forecast", [])
+    out = app.invoke({"question": "Спрогнозируй Brent на 90 дней"})
+
+    assert out.get("used_web") is True, "пустой корпус не привёл к веб-поиску"
+
+
+def test_industry_route_does_not_run_the_calculation(monkeypatch):
+    """Второй отрицательный контроль: ветки не слились в одну.
+
+    Починка «пусть прогноз тоже ходит в корпус» соблазняет свести граф к
+    одному пути, где считается всё и всегда. Тогда на отраслевой вопрос без
+    просьбы о прогнозе в ответ поедет ARIMA, а расчёт — самый дорогой узел.
+    """
+    app = _graph_with_stub_nodes(monkeypatch, "industry", ["ф1", "ф2", "ф3"])
+    out = app.invoke({"question": "Что происходит с добычей ОПЕК+?"})
+
+    assert out.get("used_reports") is True
+    assert "forecast_text" not in out, "расчёт запустился на вопросе, где его не просили"

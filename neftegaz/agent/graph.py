@@ -289,7 +289,14 @@ def build_graph():
                                 {"forecast": "forecast", "retrieve": "retrieve", "out_of_scope": "out_of_scope"})
     graph.add_conditional_edges("retrieve", _after_retrieve, {"web": "web", "answer": "answer"})
     graph.add_edge("web", "answer")
-    graph.add_edge("forecast", "answer")
+    # ★Расчёт ведёт в поиск по корпусу, а не прямо в ответ. Требование 2.4
+    # задаёт ПРИОРИТЕТ источников, а не выбор одного из них: собственная
+    # модель дополняет отчёты. Прямое ребро в ответ стоило конкретного
+    # дефекта — вопрос «какой прогноз EIA по Brent на 2027 год» уходил в
+    # ветку прогноза и получал «в базе отчётов ничего не найдено», хотя поиск
+    # по тому же вопросу возвращает фрагменты с близостью 0.72 при пороге
+    # 0.55 и нужная таблица STEO в корпусе есть.
+    graph.add_edge("forecast", "retrieve")
     graph.add_edge("answer", END)
     graph.add_edge("out_of_scope", END)
     return graph.compile()
