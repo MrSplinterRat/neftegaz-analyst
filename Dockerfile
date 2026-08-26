@@ -43,10 +43,31 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# ★POPPLER — ДВИЖОК КООРДИНАТ, И БЕЗ НЕГО РАЗБОР PDF НЕ РАБОТАЕТ.
+#
+# PDF — предпечатный макет: в файле лежат геометрические примитивы, а тега
+# «таблица» в нём нет и не предполагалось. Структуру таблицы поэтому
+# восстанавливают из координат слов, и координаты даёт pdftotext -bbox-layout.
+#
+# Стоит отдельным слоем и ПЕРВЫМ: apt меняется реже всех остальных слоёв.
+# Цена — около 5 МБ образа; питоновские движки координат стоят 57 и 64 МБ.
+# Poppler к тому же вызывается отдельным процессом, поэтому его GPL не
+# смешивается с кодом приложения.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # Слой зависимостей отдельно от кода: правка исходников не инвалидирует
 # установку пакетов, и пересборка занимает секунды вместо минут.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# pdf2xml едет КОЛЕСОМ, а не копией исходников. Библиотека — отдельный проект
+# (/opt/eidos/pdf2xml), и вторая копия её кода в этом репозитории разошлась бы
+# с оригиналом на первой же правке. Колесо пересобирается командой
+#     pip wheel /opt/eidos/pdf2xml -w vendor --no-deps
+COPY vendor/pdf2xml-0.1.0-py3-none-any.whl ./vendor/
+RUN pip install --no-cache-dir vendor/pdf2xml-0.1.0-py3-none-any.whl
 
 COPY neftegaz/ ./neftegaz/
 COPY ui/ ./ui/
