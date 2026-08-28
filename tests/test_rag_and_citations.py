@@ -10,11 +10,10 @@ from __future__ import annotations
 import pytest
 
 from neftegaz.agent.graph import parse_horizon_days, parse_supply_change
-from neftegaz.rag.chunking import chunk_document, chunk_pages
+from neftegaz.rag.chunking import chunk_document, chunk_pages, row_pairs
 from neftegaz.rag.ingest import parse_filename
 from neftegaz.tools.citations import format_answer, format_claim
 from neftegaz.tools.web import DENY_DOMAINS, WebResult, _domain, _is_denied, _is_preferred
-
 
 # ── chunking ───────────────────────────────────────────────────────────────
 
@@ -860,11 +859,45 @@ def _row_named(chunks: list[dict], label: str) -> dict:
 
 
 def test_row_carries_the_column_header_not_only_the_caption():
+    """Строка несёт и заголовок таблицы, и привязку чисел к столбцам.
+
+    Привязка приходит парами «столбец = значение», а не двумя отдельными
+    списками: раньше здесь проверялось наличие ряда «Q1 Q2 Q3 …» дословно, и
+    этого было мало — ряд названий сам по себе оставлял модели сопоставление по
+    счёту. Требование то же («числа не должны остаться безымянными»), проверка
+    строже: у каждого числа назван ЕГО столбец.
+    """
     chunks = chunk_pages([{"page": 31, "text": _HEADER_STREAM}], size=200, overlap=40)
     row = _row_named(chunks, "OPEC members subject")
 
     assert "World Petroleum" in row["context"], "потерян заголовок таблицы"
-    assert _COLUMNS in row["context"], "потеряна шапка колонок — числа снова безымянны"
+    context = row["context"]
+    assert "Q1 = 21.55" in context, "первое число не привязано к своему столбцу"
+    assert "2027 = 22.74" in context, "последнее число не привязано к своему столбцу"
+    assert context.count("=") == len(_COLUMNS.split()), "привязаны не все столбцы"
+
+
+def test_pairs_are_refused_when_the_counts_do_not_match():
+    """★Отрицательный контроль: неполная строка пар не получает.
+
+    У «Refinery capacity» шесть значений при пятнадцати столбцах. Любая пара
+    здесь была бы выдумкой — и выдумкой правдоподобной, потому что все числа
+    настоящие. Строка остаётся с одним заголовком таблицы.
+    """
+    chunks = chunk_pages([{"page": 31, "text": _HEADER_STREAM}], size=200, overlap=40)
+    row = _row_named(chunks, "Refinery capacity")
+
+    assert "=" not in row["context"], "пары построены при несовпадении длин"
+    assert "World Petroleum" in row["context"], "потерян заголовок таблицы"
+
+
+def test_pairs_keep_the_dash_as_a_value():
+    """Прочерк — утверждение «данных нет», а не пропуск.
+
+    Выбросив его молча, мы сдвинули бы все следующие значения на столбец влево:
+    ровно та ошибка, ради которой пары и написаны, только изнутри.
+    """
+    assert row_pairs("Alpha ... 1.0 - 3.0", "Q1 Q2 Q3") == "Alpha: Q1 = 1.0, Q2 = -, Q3 = 3.0"
 
 
 def test_running_header_is_not_mistaken_for_the_column_header():
