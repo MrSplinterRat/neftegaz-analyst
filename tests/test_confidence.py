@@ -1,0 +1,156 @@
+"""Tests for the confidence level carried on each chunk.
+
+These check the property that makes the level worth having: it can only ever
+overstate a fragment by mistake, never by design. Nothing silently becomes
+«read directly» — not a missing verdict, not a missing cross-check, not an old
+point in the collection indexed before the check existed.
+"""
+
+from __future__ import annotations
+
+from neftegaz.rag.confidence import (
+    DIRECT,
+    DISPUTED,
+    GEOMETRY,
+    UNCHECKED,
+    annotate_chunks,
+    chunk_confidence,
+    document_caveats,
+    level_of_verdict,
+    worst_level,
+)
+from neftegaz.rag.crosscheck import AGREE, DIVERGE, ORDER, TOKENIZE, CrossCheckReport, compare_pages
+from neftegaz.rag.intake import inspect_pdf
+
+# ── отображение вердиктов ──────────────────────────────────────────────────
+
+
+def test_each_verdict_maps_to_its_level():
+    assert level_of_verdict(AGREE) == DIRECT
+    assert level_of_verdict(ORDER) == GEOMETRY
+    assert level_of_verdict(TOKENIZE) == GEOMETRY
+    assert level_of_verdict(DIVERGE) == DISPUTED
+
+
+def test_an_unknown_verdict_is_unchecked_not_direct():
+    """A verdict we do not recognise must not be read as good news."""
+    assert level_of_verdict("something-new") == UNCHECKED
+
+
+def test_worst_level_wins_and_an_empty_list_is_unchecked():
+    assert worst_level([DIRECT, GEOMETRY]) == GEOMETRY
+    assert worst_level([DIRECT, DISPUTED, GEOMETRY]) == DISPUTED
+    assert worst_level([DIRECT, UNCHECKED]) == UNCHECKED
+    assert worst_level([]) == UNCHECKED
+
+
+# ── фрагмент ───────────────────────────────────────────────────────────────
+
+
+def test_a_chunk_on_one_clean_page_is_direct():
+    level, reasons = chunk_confidence(3, 3, {3: AGREE})
+    assert level == DIRECT
+    assert reasons == []
+
+
+def test_a_chunk_spanning_a_clean_and_a_contested_page_takes_the_worse():
+    """One citation, one mark — and it must answer for the whole quoted text."""
+    level, reasons = chunk_confidence(3, 4, {3: AGREE, 4: DIVERGE})
+    assert level == DISPUTED
+    assert reasons == ["с. 4: пути расходятся по цифрам"]
+
+
+def test_reasons_name_the_page_and_the_kind_of_disagreement():
+    _level, reasons = chunk_confidence(1, 2, {1: ORDER, 2: TOKENIZE})
+    assert reasons == [
+        "с. 1: пути читают числа в разном порядке",
+        "с. 2: пути по-разному членят числа",
+    ]
+
+
+def test_a_page_missing_from_the_cross_check_is_unchecked():
+    level, _reasons = chunk_confidence(9, 9, {1: AGREE})
+    assert level == UNCHECKED
+
+
+def test_no_cross_check_at_all_is_unchecked():
+    assert chunk_confidence(1, 1, None) == (UNCHECKED, [])
+    assert chunk_confidence(1, 1, {}) == (UNCHECKED, [])
+
+
+# ── оговорки документа ─────────────────────────────────────────────────────
+
+
+def test_document_caveats_are_absent_without_an_intake_report():
+    assert document_caveats(None) == []
+
+
+def test_font_caveat_does_not_lower_the_level_but_is_carried(tmp_path):
+    """A file-wide risk is a different statement from a contested page."""
+    broken = tmp_path / "x.pdf"
+    broken.write_bytes(b"not a pdf at all")
+    intake = inspect_pdf(str(broken))
+
+    chunks = [{"page_start": 1, "page_end": 1, "page": 1, "text": "x"}]
+    annotate_chunks(chunks, crosscheck=None, intake=intake)
+    # Уровень определяется сверкой, которой не было, — значит unchecked, а
+    # находки приёмки едут рядом, не подменяя его.
+    assert chunks[0]["confidence"] == UNCHECKED
+    assert chunks[0]["caveats"], "находки приёмки должны доехать до фрагмента"
+
+
+# ── склейка всего вместе ───────────────────────────────────────────────────
+
+
+def make_report(verdicts: dict[int, str]) -> CrossCheckReport:
+    report = CrossCheckReport(path="x.pdf")
+    for page, verdict in sorted(verdicts.items()):
+        # Строим страницы через реальную функцию сравнения, чтобы тест не
+        # зависел от того, как именно устроен PageDiff внутри.
+        pairs = {
+            AGREE: ("1", "1"),
+            ORDER: ("1 2", "2 1"),
+            TOKENIZE: ("11", "1 1"),
+            DIVERGE: ("1", "1 2"),
+        }[verdict]
+        diff = compare_pages(pairs[0], pairs[1], page)
+        assert diff.verdict == verdict
+        report.pages.append(diff)
+    return report
+
+
+def test_annotate_stamps_every_chunk():
+    chunks = [
+        {"page_start": 1, "page_end": 1, "page": 1, "text": "a"},
+        {"page_start": 2, "page_end": 3, "page": 2, "text": "b"},
+    ]
+    annotate_chunks(chunks, crosscheck=make_report({1: AGREE, 2: AGREE, 3: DIVERGE}))
+    assert chunks[0]["confidence"] == DIRECT
+    assert chunks[1]["confidence"] == DISPUTED
+    assert all("caveats" in chunk for chunk in chunks)
+
+
+def test_annotate_without_a_cross_check_marks_everything_unchecked():
+    chunks = [{"page_start": 1, "page_end": 1, "page": 1, "text": "a"}]
+    annotate_chunks(chunks)
+    assert chunks[0]["confidence"] == UNCHECKED
+
+
+def test_confidence_reaches_the_citation():
+    """The end-to-end property: what the reader finally sees."""
+    from neftegaz.rag.store import Hit
+    from neftegaz.tools.citations import format_claim
+
+    hit = Hit(
+        text="13.28 13.51",
+        score=0.7,
+        source_name="EIA STEO",
+        date="июль 2026",
+        page=22,
+        page_end=22,
+        confidence=DISPUTED,
+        caveats=("с. 22: пути расходятся по цифрам",),
+    )
+    rendered = format_claim(hit.as_claim())
+    assert "с. 22" in rendered
+    assert "расходятся" in rendered

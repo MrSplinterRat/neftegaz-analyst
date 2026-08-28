@@ -16,11 +16,27 @@ verified. So a missing field raises instead of defaulting.
 
 from __future__ import annotations
 
-__all__ = ["REQUIRED_FIELDS", "format_claim", "format_answer"]
+__all__ = ["REQUIRED_FIELDS", "CONFIDENCE_MARK", "format_claim", "format_answer"]
 
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "report": ("text", "source_name", "date", "page"),
     "web": ("text", "source_name"),
+}
+
+# ★КАК ФРАГМЕНТ БЫЛ ПРОЧИТАН — ЧАСТЬ ССЫЛКИ, А НЕ ПРИМЕЧАНИЕ К НЕЙ.
+# Ссылка обещает проверяемость: «откройте страницу 14 и увидите то же самое».
+# Обещание держится ровно настолько, насколько мы уверены, что прочли эту
+# страницу верно. Если два независимых пути чтения дали на ней разные цифры,
+# умолчать об этом — значит выдать спорное за проверенное; ровно то, что
+# докстринг этого модуля называет самым вредным, что он мог бы сделать.
+#
+# «Прочитано напрямую» не печатается: у чистой ссылки метка должна оставаться
+# чистой, иначе оговорка на спорной перестанет бросаться в глаза.
+CONFIDENCE_MARK: dict[str, str] = {
+    "direct": "",
+    "geometry": "текст собран по геометрии страницы",
+    "disputed": "⚠ два пути чтения расходятся по цифрам",
+    "unchecked": "сверка чтения не выполнялась",
 }
 
 
@@ -37,7 +53,14 @@ def format_claim(claim: dict) -> str:
             raise KeyError(field)
 
     if source_type == "report":
-        mark = f"[Отчёт {claim['source_name']}, {claim['date']}, с. {claim['page']}]"
+        inside = f"Отчёт {claim['source_name']}, {claim['date']}, с. {claim['page']}"
+        # Отсутствие поля — это «не проверяли», а не «проверено и чисто».
+        # Умолчание в другую сторону сделало бы отключение сверки способом
+        # улучшить все цитаты разом.
+        note = CONFIDENCE_MARK.get(claim.get("confidence", "unchecked"), "")
+        if note:
+            inside = f"{inside}; {note}"
+        mark = f"[{inside}]"
     else:
         mark = f"[Источник: {claim['source_name']}, web]"
     return f"{claim['text']} {mark}"

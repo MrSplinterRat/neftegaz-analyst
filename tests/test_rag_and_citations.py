@@ -278,10 +278,51 @@ def test_report_citation_exact_format():
         "source_name": "OPEC MOMR",
         "date": "март 2025",
         "page": 14,
+        # Ступень достоверности — часть ссылки; у прочитанного напрямую метка
+        # остаётся чистой, чтобы оговорка на спорном фрагменте была заметна.
+        "confidence": "direct",
     }
     assert format_claim(claim) == (
         "Спрос вырастет на 1.2 млн барр./сут. [Отчёт OPEC MOMR, март 2025, с. 14]"
     )
+
+
+def test_claim_without_confidence_says_the_check_did_not_run():
+    """Missing status is «not checked», never «checked and clean»."""
+    claim = {
+        "source_type": "report",
+        "text": "Спрос вырастет.",
+        "source_name": "OPEC MOMR",
+        "date": "март 2025",
+        "page": 14,
+    }
+    assert format_claim(claim).endswith("с. 14; сверка чтения не выполнялась]")
+
+
+def test_disputed_fragment_carries_the_warning_into_the_citation():
+    """The whole point of Pareto-3: a contested page cannot look verified."""
+    claim = {
+        "source_type": "report",
+        "text": "Добыча 13.28 млн барр./сут.",
+        "source_name": "EIA STEO",
+        "date": "июль 2026",
+        "page": 22,
+        "confidence": "disputed",
+    }
+    rendered = format_claim(claim)
+    assert "с. 22; ⚠ два пути чтения расходятся по цифрам]" in rendered
+
+
+def test_geometry_fragment_says_how_it_was_assembled():
+    claim = {
+        "source_type": "report",
+        "text": "Строка таблицы.",
+        "source_name": "EIA STEO",
+        "date": "июль 2026",
+        "page": 30,
+        "confidence": "geometry",
+    }
+    assert format_claim(claim).endswith("с. 30; текст собран по геометрии страницы]")
 
 
 def test_web_citation_exact_format():
@@ -311,6 +352,7 @@ def test_mixed_answer_marks_each_paragraph_separately():
                 "source_name": "EIA STEO",
                 "date": "июль 2026",
                 "page": 7,
+                "confidence": "direct",
             },
             {"source_type": "web", "text": "Цена выросла сегодня.", "source_name": "Reuters"},
         ]

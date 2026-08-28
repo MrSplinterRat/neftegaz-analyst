@@ -43,6 +43,11 @@ class Hit:
     # НАДО: без него ряд чисел нечитаем, и она честно отвечает «заголовков
     # колонок не видно». До этого поля контекст доходил только до эмбеддинга.
     context: str = ""
+    # ★КАК ЭТОТ ФРАГМЕНТ БЫЛ ПРОЧИТАН — см. neftegaz.rag.confidence. Едет от
+    # индексации до цитаты, потому что в момент ответа файла уже нет: статус,
+    # не доехавший до цитаты, не существует.
+    confidence: str = "unchecked"
+    caveats: tuple[str, ...] = ()
 
     def as_claim(self, text: str | None = None) -> dict:
         """Shape this hit for :mod:`neftegaz.tools.citations`."""
@@ -52,6 +57,8 @@ class Hit:
             "source_name": self.source_name,
             "date": self.date,
             "page": self.page,
+            "confidence": self.confidence,
+            "caveats": list(self.caveats),
         }
 
 
@@ -337,6 +344,8 @@ class ReportStore:
                         "date": chunk["date"],
                         "page": chunk["page"],
                         "page_end": chunk.get("page_end", chunk["page"]),
+                        "confidence": chunk.get("confidence", "unchecked"),
+                        "caveats": chunk.get("caveats", []),
                     },
                 )
                 for chunk, vector in zip(batch, vectors)
@@ -493,6 +502,11 @@ class ReportStore:
                     page=int(payload.get("page", 0)),
                     page_end=int(payload.get("page_end", payload.get("page", 0))),
                     context=payload.get("context", ""),
+                    # Старые точки в коллекции этих полей не имеют: до них
+                    # сверки не было, и подставлять им "прочитано напрямую"
+                    # значило бы задним числом заверить непроверенное.
+                    confidence=payload.get("confidence", "unchecked"),
+                    caveats=tuple(payload.get("caveats", ())),
                 )
             )
             if len(hits) == top_k:
