@@ -13,10 +13,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from neftegaz.config import settings
 from neftegaz.forecast.data import load_prices_from_frame
 from neftegaz.forecast.models import arima_forecast, forecast, simple_exponential_smoothing
-from neftegaz.tools.forecast_tool import PRICE_ELASTICITY, apply_supply_scenario
-
+from neftegaz.tools.forecast_tool import (
+    apply_supply_scenario,
+    elasticity_for_horizon,
+    price_multiplier,
+)
 
 # ── loader ─────────────────────────────────────────────────────────────────
 
@@ -155,21 +159,122 @@ def test_supply_increase_lowers_price(series):
     assert (glut.frame["forecast"] < base.frame["forecast"]).all()
 
 
-def test_scenario_magnitude_matches_stated_elasticity(series):
-    """The documented elasticity must be what the code actually applies."""
+def test_scenario_follows_the_constant_elasticity_curve(series):
+    """Заявленная кривая должна быть той, которую код действительно применяет."""
     base = simple_exponential_smoothing(series, horizon=5)
-    cut = apply_supply_scenario(base, supply_change_mb_d=-1.02)  # exactly 1% of supply
+    change = -1.02  # ровно 1% мирового предложения при 102 млн барр./сут
+    cut = apply_supply_scenario(base, supply_change_mb_d=change, horizon_days=5)
+
+    share = change / settings.global_supply_mb_d
+    expected = price_multiplier(share, elasticity_for_horizon(5))
     ratio = float(cut.frame["forecast"].iloc[0] / base.frame["forecast"].iloc[0])
-    assert ratio == pytest.approx(1.0 + PRICE_ELASTICITY / 100.0, rel=1e-6)
+    assert ratio == pytest.approx(expected, rel=1e-9)
+
+
+def test_small_shock_still_agrees_with_the_old_linear_calibration(series):
+    """Замена формы не должна терять прежнюю калибровку на малых шоках.
+
+    Линейная форма давала множитель ``1 − share·10``. На шоке в 1% мирового
+    предложения обе формы обязаны совпасть в пределах процента — иначе мы не
+    исправили функцию, а поменяли ответ.
+    """
+    base = simple_exponential_smoothing(series, horizon=5)
+    change = 1.02  # +1% предложения
+    glut = apply_supply_scenario(base, supply_change_mb_d=change, horizon_days=5)
+
+    share = change / settings.global_supply_mb_d
+    linear = 1.0 - share * 10.0
+    actual = float(glut.frame["forecast"].iloc[0] / base.frame["forecast"].iloc[0])
+    assert actual == pytest.approx(linear, rel=0.01)
+
+
+def test_cut_moves_price_more_than_an_equal_increase(series):
+    """Асимметрия — свойство рынка, и она должна возникать из формы кривой.
+
+    Заменить нефть немедленно нечем, а избыток упирается в стоимость хранения,
+    поэтому сокращение бьёт сильнее наращивания того же объёма. Линейная форма
+    этого не умела: она двигала цену одинаково в обе стороны.
+    """
+    base = simple_exponential_smoothing(series, horizon=5)
+    start = float(base.frame["forecast"].iloc[0])
+
+    cut = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=5)
+    glut = apply_supply_scenario(base, supply_change_mb_d=+2.0, horizon_days=5)
+
+    up = float(cut.frame["forecast"].iloc[0]) - start
+    down = start - float(glut.frame["forecast"].iloc[0])
+    assert up > down
+
+
+def test_large_shock_is_computed_rather_than_refused(series):
+    """Шок в 10% предложения раньше ронял расчёт — теперь считается.
+
+    Линейный множитель ``1 − 0.1·10`` обращался в ноль, и код отказывался
+    отвечать ровно на самый интересный вопрос.
+    """
+    base = simple_exponential_smoothing(series, horizon=5)
+    glut = apply_supply_scenario(base, supply_change_mb_d=10.2, horizon_days=5)
+    ratio = float(glut.frame["forecast"].iloc[0] / base.frame["forecast"].iloc[0])
+    assert 0.0 < ratio < 1.0
+
+
+def test_only_total_loss_of_supply_is_refused(series):
+    """Отказ остаётся, но его граница теперь физическая, а не артефакт формы."""
+    base = simple_exponential_smoothing(series, horizon=5)
+    with pytest.raises(ValueError):
+        apply_supply_scenario(base, supply_change_mb_d=-settings.global_supply_mb_d)
+
+
+def test_longer_horizon_dampens_the_price_move(series):
+    """На длинном горизонте спрос эластичнее, значит тот же шок двигает цену слабее."""
+    base = simple_exponential_smoothing(series, horizon=5)
+    near = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=30)
+    far = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=1825)
+    assert float(near.frame["forecast"].iloc[0]) > float(far.frame["forecast"].iloc[0])
+
+
+def test_elasticity_saturates_outside_the_interpolation_range():
+    """За пределами заданных горизонтов эластичность не экстраполируется."""
+    assert elasticity_for_horizon(1) == settings.demand_elasticity_short
+    assert elasticity_for_horizon(10_000) == settings.demand_elasticity_long
+    middle = elasticity_for_horizon(
+        (settings.elasticity_short_days + settings.elasticity_long_days) // 2
+    )
+    assert settings.demand_elasticity_long < middle < settings.demand_elasticity_short
+
+
+def test_scenario_widens_the_band_relative_to_the_line(series):
+    """Сценарий добавляет допущение, и коридор обязан это отразить.
+
+    Прежняя версия умножала весь кадр на одно число: относительная ширина
+    коридора не менялась, то есть код утверждал, что добавленная гипотеза об
+    эластичности ничего не стоит.
+    """
+    base = simple_exponential_smoothing(series, horizon=5)
+    cut = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=5)
+
+    def relative_width(result):
+        row = result.frame.iloc[0]
+        return float((row["upper"] - row["lower"]) / row["forecast"])
+
+    assert relative_width(cut) > relative_width(base)
+
+
+def test_band_order_is_preserved_after_the_scenario(series):
+    """lower ≤ forecast ≤ upper — инвариант, который расширение не должно ломать."""
+    base = simple_exponential_smoothing(series, horizon=5)
+    for change in (-5.0, -1.0, 1.0, 5.0):
+        moved = apply_supply_scenario(base, supply_change_mb_d=change, horizon_days=5)
+        assert (moved.frame["lower"] <= moved.frame["forecast"]).all()
+        assert (moved.frame["forecast"] <= moved.frame["upper"]).all()
+
+
+def test_positive_elasticity_is_rejected():
+    """Положительная эластичность означала бы, что рост цены поднимает спрос."""
+    with pytest.raises(ValueError):
+        price_multiplier(0.01, 0.10)
 
 
 def test_zero_scenario_is_identity(series):
     base = simple_exponential_smoothing(series, horizon=5)
     assert apply_supply_scenario(base, 0.0) is base
-
-
-def test_absurd_scenario_is_refused(series):
-    """Rather than print a negative oil price."""
-    base = simple_exponential_smoothing(series, horizon=5)
-    with pytest.raises(ValueError):
-        apply_supply_scenario(base, supply_change_mb_d=50.0)

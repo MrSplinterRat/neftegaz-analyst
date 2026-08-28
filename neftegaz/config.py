@@ -104,6 +104,35 @@ class Settings:
     web_results: int = field(default_factory=lambda: _env_int("WEB_RESULTS", 5))
     web_region: str = field(default_factory=lambda: _env("WEB_REGION", "ru-ru"))
 
+    # ── Сценарий предложения: эластичность спроса по цене ──────────────────
+    # Весь сценарный расчёт («что будет с ценой, если добыча упадёт на N млн
+    # барр./сут») стоит на этих числах, поэтому они здесь, а не в модуле:
+    # рецензент должен иметь возможность не согласиться, не трогая код.
+    #
+    # Эластичность спроса по цене отрицательна: рост цены снижает потребление.
+    # Краткосрочные оценки кучкуются в диапазоне −0.05…−0.10 (месяцы), и мы
+    # берём КОНСЕРВАТИВНЫЙ край −0.10: чем больше модуль, тем слабее ценовой
+    # отклик, то есть тем осторожнее сценарий.
+    demand_elasticity_short: float = field(default_factory=lambda: _env_float("DEMAND_ELASTICITY_SHORT", -0.10))
+    # На длинном горизонте эластичность растёт по модулю: потребитель успевает
+    # изменить поведение, производитель — вложиться. Оценки для многолетних
+    # горизонтов дают −0.3…−0.9; берём нижнюю границу.
+    demand_elasticity_long: float = field(default_factory=lambda: _env_float("DEMAND_ELASTICITY_LONG", -0.30))
+    # Горизонты, между которыми эластичность интерполируется линейно; за
+    # пределами — насыщение. 90 дней это квартал, 1825 — пять лет.
+    elasticity_short_days: int = field(default_factory=lambda: _env_int("ELASTICITY_SHORT_DAYS", 90))
+    elasticity_long_days: int = field(default_factory=lambda: _env_int("ELASTICITY_LONG_DAYS", 1825))
+    # ★Полоса неопределённости самой эластичности. −0.10 это КРАЙ литературного
+    # диапазона, поэтому полоса односторонняя: истинный отклик может быть
+    # только сильнее нашей центральной оценки, не слабее. Коридор прогноза
+    # расширяется ровно на это незнание — сценарий добавляет гипотезу, а
+    # гипотеза не может сузить доверительный интервал.
+    demand_elasticity_band: float = field(default_factory=lambda: _env_float("DEMAND_ELASTICITY_BAND", -0.05))
+    # Мировое предложение жидких углеводородов, млн барр./сут. Значение по
+    # умолчанию — порядок, а не факт дня; при подключённом ряду поставщика
+    # его следует брать из данных.
+    global_supply_mb_d: float = field(default_factory=lambda: _env_float("GLOBAL_SUPPLY_MB_D", 102.0))
+
     # ── Data locations ─────────────────────────────────────────────────────
     reports_dir: str = field(default_factory=lambda: _env("REPORTS_DIR", str(ROOT / "data" / "reports")))
     prices_csv: str = field(default_factory=lambda: _env("PRICES_CSV", str(ROOT / "data" / "prices" / "brent.csv")))
