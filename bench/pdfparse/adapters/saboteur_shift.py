@@ -12,7 +12,7 @@ NAME = "вредитель: сдвиг на 1"
 SABOTEUR = True
 
 
-def parse(path: str) -> list[dict]:
+def parse(path: str) -> list[dict]:  # noqa: ARG001 — сигнатуру задаёт интерфейс адаптера; данные синтетические, с диска не читаются
     result = tables()
     for table in result:
         for row in table["rows"]:

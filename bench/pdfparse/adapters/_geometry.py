@@ -22,7 +22,16 @@
 
 Запуск:  python3 eia_table_rows.py <файл.pdf> [--engine pdfplumber|poppler|pymupdf] [страница]
 """
-import re, sys, subprocess
+# ruff: noqa: E701, E702, UP031
+# ★Плотный стиль этого файла — осознанный и локальный: это standalone-скрипт
+# разбора геометрии, где `if …: continue` и `a = x; break` держат шаг алгоритма
+# на одной строке и читаются как псевдокод из докстринга выше. Проценты в печати
+# оставлены ради выравнивания колонок (`%-46s`), которое f-строкой не короче.
+# Запреты сняты ФАЙЛОМ, а не в настройках линтера: в остальном коде эти правила
+# должны продолжать работать.
+import re
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 
 VALUE = re.compile(r'^(-|--|NA|W|-?\d[\d,]*\.\d+)$')
@@ -91,7 +100,7 @@ def parse_page(ws, inherited_caption=None):
     band = [w for w in (sorted(lines[hi - 1], key=lambda w: w[1]) if hi else [])
             if (len(w[0]) == 4 and w[0].isdigit()) or w[0] == "Year"]
     columns = []
-    for c, n in zip(centers, names):
+    for c, n in zip(centers, names, strict=True):  # оба из одного hdr, длины равны по построению
         b = min(band, key=lambda w: abs((w[1] + w[2]) / 2 - c))[0] if band else ""
         columns.append(n if b in ("", "Year") else b + n)
     bounds = [(centers[i] + centers[i + 1]) / 2 for i in range(len(centers) - 1)]

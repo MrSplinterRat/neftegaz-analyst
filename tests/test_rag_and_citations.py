@@ -866,8 +866,12 @@ def test_column_header_of_a_distant_table_is_not_borrowed():
     молча привяжет числа к периодам другой таблицы, и ответ будет выглядеть
     обычным. Правило удалённости у них поэтому одно.
     """
-    from neftegaz.rag.chunking import MAX_CAPTION_DISTANCE, caption_positions, header_positions
-    from neftegaz.rag.chunking import table_context_before
+    from neftegaz.rag.chunking import (
+        MAX_CAPTION_DISTANCE,
+        caption_positions,
+        header_positions,
+        table_context_before,
+    )
 
     stream = _HEADER_STREAM + "x" * (MAX_CAPTION_DISTANCE + 100)
     captions = caption_positions(stream)

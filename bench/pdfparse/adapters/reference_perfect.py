@@ -11,5 +11,5 @@ NAME = "контроль: идеал"
 SABOTEUR = False
 
 
-def parse(path: str) -> list[dict]:
+def parse(path: str) -> list[dict]:  # noqa: ARG001 — сигнатуру задаёт интерфейс адаптера; данные синтетические, с диска не читаются
     return tables()
