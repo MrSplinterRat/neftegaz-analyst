@@ -1074,3 +1074,54 @@ def test_context_fits_the_budget_and_says_when_it_was_cut():
     # ★Пустого контекста быть не должно ни при каком бюджете: он превратил бы
     # ответ по источникам в ответ по памяти модели.
     assert _format_report_context([FakeHit("y" * 50000, 0)]).strip()
+
+
+# ── детерминизм индекса и выдачи ───────────────────────────────────────────
+# ★Добавлено 27.08.2026. Оба отказа ниже НЕ ПАДАЮТ и не видны в обычных тестах:
+# они возвращают правдоподобный результат, который в следующий раз оказывается
+# другим. Ловятся только тем, что проверяется прямо.
+
+
+def test_chunk_id_is_derived_from_content_not_random():
+    """Идентификатор фрагмента обязан быть один и тот же при каждой сборке.
+
+    Со случайным идентификатором две сборки одного корпуса давали разные
+    индексы, повторная загрузка отчёта добавляла копии вместо замены, а равные
+    оценки нечем было развязать устойчиво.
+    """
+    from neftegaz.rag.store import chunk_id
+
+    chunk = {
+        "source_name": "EIA STEO", "date": "июль 2026", "kind": "row",
+        "page": 31, "page_end": 31, "start": 1200, "text": "United States ... 13.28",
+    }
+    assert chunk_id(chunk) == chunk_id(dict(chunk)), "идентификатор не воспроизводится"
+
+    other = dict(chunk, page=32)
+    assert chunk_id(chunk) != chunk_id(other), "разные страницы дали один идентификатор"
+
+    same_text_other_report = dict(chunk, date="июнь 2026")
+    assert chunk_id(chunk) != chunk_id(same_text_other_report), "разные отчёты слились"
+
+
+def test_equal_scores_are_broken_deterministically():
+    """При равных оценках порядок задаётся содержанием, а не ответом хранилища.
+
+    Порядок точек с одинаковым косинусом хранилищем не оговорён. Устойчивая
+    сортировка сохраняет входной порядок — но только он и не устойчив.
+    """
+    from neftegaz.rag.store import _identity_of
+
+    one = {"date": "июнь 2026", "source_name": "EIA STEO", "page": 9, "kind": "row", "text": "a"}
+    two = {"date": "июль 2026", "source_name": "EIA STEO", "page": 3, "kind": "row", "text": "a"}
+
+    assert _identity_of(one) == _identity_of(dict(one)), "ключ не воспроизводится"
+    assert _identity_of(one) != _identity_of(two), "разные фрагменты дали один ключ"
+
+    # Главное: порядок не зависит от того, в каком порядке пришли записи.
+    assert sorted([one, two], key=_identity_of) == sorted([two, one], key=_identity_of)
+
+    # ★А вот чего ключ НЕ обещает — хронологии. «июль» встаёт раньше «июня»,
+    # потому что это сравнение строк. Проверяется явно, чтобы обещание не
+    # выросло в комментариях само собой: устойчивость есть, хронологии нет.
+    assert _identity_of(two) < _identity_of(one), "поведение ключа изменилось — сверить docstring"

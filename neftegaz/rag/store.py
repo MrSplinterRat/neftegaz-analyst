@@ -24,7 +24,64 @@ from functools import lru_cache
 
 from neftegaz.config import settings
 
-__all__ = ["Hit", "ReportStore", "carries_no_data", "get_store"]
+__all__ = ["Hit", "ReportStore", "carries_no_data", "chunk_id", "get_store"]
+
+# Пространство имён для идентификаторов фрагментов. Взято постоянным и записано
+# здесь: смена этого значения меняет идентификаторы ВСЕГО корпуса.
+_CHUNK_NAMESPACE = uuid.UUID("6f2a1c94-77f0-5b3e-9a41-3d0c8e5b2a17")
+
+
+def _identity_of(payload: dict) -> tuple:
+    """Устойчивый ключ фрагмента для развязки равных оценок.
+
+    Берётся из содержания, а не из идентификатора точки: идентификатор задаёт
+    порядок, никак не связанный со смыслом, и при пересборке индекса он мог бы
+    оказаться другим. Здесь же порядок при равных оценках получается один и тот
+    же на любой машине и в любой сборке.
+
+    ★ЧЕГО ЭТОТ КЛЮЧ НЕ ДАЁТ: хронологии. Поле `date` хранит название месяца
+    по-русски («июль 2026»), и сравнение строк ставит июль раньше июня — это
+    алфавит, а не время. Здесь этого достаточно: требуется устойчивость, а не
+    осмысленный порядок между равными по близости фрагментами. Понадобится
+    хронология — в полезную нагрузку придётся положить сортируемую дату, а не
+    вычитывать её из русского названия месяца.
+    """
+    return (
+        str(payload.get("date", "")),
+        str(payload.get("source_name", "")),
+        int(payload.get("page", 0) or 0),
+        str(payload.get("kind", "")),
+        str(payload.get("text", "")),
+    )
+
+
+def chunk_id(chunk: dict) -> str:
+    """Идентификатор фрагмента, выведенный из его содержания.
+
+    ★ЗАЧЕМ. Раньше здесь стоял `uuid.uuid4()` — случайное число. Из этого
+    следовали три вещи, и все три плохие.
+
+    Первая: две сборки индекса по одному и тому же корпусу давали РАЗНЫЕ
+    идентификаторы. Значит «тот же вход — тот же индекс» было неправдой, а
+    сравнить две сборки между собой было нечем.
+
+    Вторая: повторная загрузка того же отчёта не заменяла прежние фрагменты, а
+    добавляла их копии — прежние остались бы в индексе навсегда, под своими
+    случайными идентификаторами. Отсюда и привычка пересобирать всё с нуля.
+
+    Третья, менее очевидная: при равных оценках порядок выдачи приходилось
+    разрешать чем-то устойчивым, а случайный идентификатор для этого не годится.
+
+    Идентификатор выводится из того, что фрагмент ЕСТЬ: имя источника, дата
+    отчёта, вид фрагмента, страницы и дословный текст. Одинаковые строки из
+    разных таблиц различаются страницами и текстом окружения не всегда, поэтому
+    в ключ входит и смещение в потоке, если оно известно.
+    """
+    key = "|".join(
+        str(chunk.get(field, ""))
+        for field in ("source_name", "date", "kind", "page", "page_end", "start", "text")
+    )
+    return uuid.uuid5(_CHUNK_NAMESPACE, key).hex
 
 
 @dataclass(frozen=True)
@@ -334,7 +391,7 @@ class ReportStore:
             vectors = self._embed_passages([embeddable(c) for c in batch])
             points = [
                 PointStruct(
-                    id=uuid.uuid4().hex,
+                    id=chunk_id(chunk),
                     vector=vector,
                     payload={
                         "text": chunk["text"],
@@ -348,7 +405,9 @@ class ReportStore:
                         "caveats": chunk.get("caveats", []),
                     },
                 )
-                for chunk, vector in zip(batch, vectors)
+                # strict: если эмбеддер вернул меньше векторов, чем чанков,
+                # молчаливое усечение отправило бы часть документа в никуда.
+                for chunk, vector in zip(batch, vectors, strict=True)
             ]
             self.client.upsert(collection_name=self.collection, points=points)
             written += len(points)
@@ -433,14 +492,23 @@ class ReportStore:
             limit=pool,
             with_payload=True,
         ).points
+        # ★РАВНЫЕ ОЦЕНКИ РАЗВЯЗЫВАЮТСЯ ЯВНО, а не порядком, в котором ответило
+        # хранилище. `sorted` в Python устойчива, то есть при равенстве ключей
+        # сохраняет входной порядок, — и это ровно то, чего здесь довольно, но
+        # только если входной порядок сам устойчив. Он не устойчив: порядок
+        # точек с одинаковым косинусом хранилищем не оговорён.
+        #
+        # Отказ здесь не падает и не виден в тестах: два одинаково близких
+        # фрагмента просто меняются местами, и на вопрос приходит другая цитата
+        # — правдоподобная, из того же отчёта, с той же оценкой. Обнаружить это
+        # можно только двумя прогонами подряд, а объяснить пользователю нечем.
         vector_ranked = sorted(
             (
                 (point, rerank_score((point.payload or {}).get("text", ""), float(point.score)))
                 for point in found
                 if point.score >= floor
             ),
-            key=lambda pair: pair[1],
-            reverse=True,
+            key=lambda pair: (-pair[1], _identity_of(pair[0].payload or {})),
         )
 
         # ── ветвь вторая: совпадение по словам ─────────────────────────────
@@ -473,7 +541,13 @@ class ReportStore:
             fused[identifier] = fused.get(identifier, 0.0) + 1.0 / (RRF_K + place + 1)
             payload_of.setdefault(identifier, payload)
 
-        order = sorted(fused, key=lambda identifier: fused[identifier], reverse=True)
+        # Та же развязка на слиянии: здесь равенство ВЕРОЯТНЕЕ, чем в векторной
+        # ветви, потому что оценка RRF складывается из мест в двух списках и
+        # принимает мало разных значений — совпадения обычное дело, а не край.
+        order = sorted(
+            fused,
+            key=lambda identifier: (-fused[identifier], _identity_of(payload_of[identifier])),
+        )
 
         # ★Порог применяется и к пришедшим по словам, для чего им приходится
         # ДОСЧИТАТЬ косинус. Пропустить фрагмент мимо порога только потому, что
@@ -532,7 +606,10 @@ class ReportStore:
             if not vector:
                 continue
             norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-            dot = sum(a * b for a, b in zip(query_vector, vector))
+            # strict: разная размерность — это порча индекса. Усечённое
+            # скалярное произведение вернуло бы правдоподобное число, и ошибка
+            # уехала бы в ранжирование незамеченной.
+            dot = sum(a * b for a, b in zip(query_vector, vector, strict=True))
             result[point.id] = dot / (query_norm * norm)
         return result
 
