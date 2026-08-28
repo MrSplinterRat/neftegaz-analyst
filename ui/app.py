@@ -15,7 +15,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from neftegaz.agent.graph import answer_question  # noqa: E402
+from neftegaz.agent.graph import answer_question, new_thread_id  # noqa: E402
 from neftegaz.config import settings  # noqa: E402
 
 st.set_page_config(page_title="Нефтегазовый аналитик", page_icon="🛢", layout="wide")
@@ -91,6 +91,24 @@ top-k `{settings.top_k}`, порог близости `{settings.min_score}`
         )
 
         st.divider()
+        memory_labels = {
+            "memory": "в памяти процесса (не пишется на диск)",
+            "sqlite": f"в файле {settings.checkpoint_db}",
+            "off": "выключена — каждый вопрос с чистого листа",
+        }
+        mode = settings.conversation_memory.strip().lower()
+        st.markdown(
+            f"**Память диалога**\n\n{memory_labels.get(mode, mode)}\n\n"
+            f"бюджет истории `{settings.history_budget_chars}` знаков"
+        )
+        if st.button("Начать разговор заново", use_container_width=True):
+            # Новый идентификатор, а не очистка хранилища: прежний разговор
+            # остаётся на месте, а этот начинается с чистого листа.
+            st.session_state.thread_id = new_thread_id()
+            st.session_state.history = []
+            st.rerun()
+
+        st.divider()
         st.caption(
             "Приоритет источников: сначала база отраслевых отчётов, "
             "веб-поиск — как дополнение и для актуальных данных."
@@ -135,6 +153,10 @@ def main() -> None:
 
     if "history" not in st.session_state:
         st.session_state.history = []
+    # Идентификатор разговора живёт в сессии браузера: два открытых окна —
+    # два разных разговора, и ходы одного не подмешиваются в другой.
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = new_thread_id()
 
     with st.expander("Примеры запросов"):
         for example in EXAMPLES:
@@ -157,7 +179,7 @@ def main() -> None:
     with st.chat_message("assistant"):
         with st.spinner("Ищу в отчётах, при необходимости — в вебе…"):
             try:
-                state = answer_question(question)
+                state = answer_question(question, thread_id=st.session_state.thread_id)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Ошибка: {exc}")
                 return

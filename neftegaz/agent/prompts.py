@@ -8,7 +8,13 @@ in a regulated industry that difference is the whole product.
 
 from __future__ import annotations
 
-__all__ = ["SYSTEM_PROMPT", "ROUTER_PROMPT", "OUT_OF_SCOPE_REPLY", "build_answer_prompt"]
+__all__ = [
+    "SYSTEM_PROMPT",
+    "ROUTER_PROMPT",
+    "OUT_OF_SCOPE_REPLY",
+    "build_answer_prompt",
+    "build_router_prompt",
+]
 
 SYSTEM_PROMPT = """Ты — старший аналитик нефтегазового рынка.
 
@@ -66,6 +72,30 @@ other    — запрос вне компетенции нефтегазовог
 
 Запрос: {question}"""
 
+
+def build_router_prompt(question: str, history_context: str = "") -> str:
+    """Промпт классификатора, при необходимости с предыдущими ходами.
+
+    Продолжение разговора («а на пять лет?», «а если сокращение будет больше?»)
+    само по себе не относится ни к какой категории: в нём нет ни отрасли, ни
+    слова «прогноз». Без предыдущего хода такой вопрос уходит в ``other``, то
+    есть пользователь получает отказ на уточнение собственного вопроса.
+
+    История подставляется только когда она есть: лишний пустой раздел в
+    промпте классификатора — это шум, который сбивает короткие ответы.
+    """
+    base = ROUTER_PROMPT.format(question=question)
+    if not history_context.strip():
+        return base
+    return f"""Предыдущие ходы разговора (нужны, если запрос — продолжение):
+{history_context.strip()}
+
+{base}
+
+Если запрос — уточнение предыдущего («а на пять лет?», «а если сокращение
+будет больше?»), классифицируй его так же, как классифицировал бы вопрос,
+который он уточняет."""
+
 OUT_OF_SCOPE_REPLY = (
     "Этот вопрос вне моей компетенции: я аналитик нефтегазового рынка и отвечаю "
     "по темам upstream, midstream, downstream, ценообразования нефти и газа, "
@@ -77,7 +107,11 @@ OUT_OF_SCOPE_REPLY = (
 
 
 def build_answer_prompt(
-    question: str, report_context: str, web_context: str, forecast_context: str = ""
+    question: str,
+    report_context: str,
+    web_context: str,
+    forecast_context: str = "",
+    history_context: str = "",
 ) -> str:
     """Assemble the final answering prompt from whatever context was gathered.
 
@@ -114,7 +148,23 @@ def build_answer_prompt(
             "  ценой. Без даты читатель примет её за сегодняшнюю котировку."
         )
 
-    return f"""Вопрос пользователя:
+    # ★История НЕ источник и стоит до источников, а не среди них. Её место в
+    # промпте — контекст вопроса: она объясняет, к чему относится «а на пять
+    # лет?». Поставить её рядом с отчётами значило бы разрешить ссылаться на
+    # собственный прошлый ответ как на проверяемый источник — то есть выдать
+    # пересказ за факт, ровно то, против чего написан весь блок правил.
+    history_block = ""
+    if history_context.strip():
+        history_block = f"""ПРЕДЫДУЩИЕ ХОДЫ РАЗГОВОРА (контекст вопроса, НЕ источник)
+{history_context.strip()}
+
+★Ходы выше нужны, только чтобы понять, к чему относится вопрос. Ссылаться на
+них нельзя: каждое число в ответе обязано иметь ссылку на источник ниже, даже
+если то же число уже звучало раньше в разговоре.
+
+"""
+
+    return f"""{history_block}Вопрос пользователя:
 {question}
 
 === ИСТОЧНИК 1: БАЗА ОТРАСЛЕВЫХ ОТЧЁТОВ (приоритетный, проверяемый) ===

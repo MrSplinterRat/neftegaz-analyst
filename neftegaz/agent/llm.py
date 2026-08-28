@@ -17,17 +17,31 @@ __all__ = ["get_llm", "ask", "llm_available", "strip_reasoning"]
 
 @lru_cache(maxsize=1)
 def get_llm():
-    """Build the chat model once per process."""
+    """Build the chat model once per process.
+
+    ★Температура передаётся, только если задана неотрицательной. Отрицательное
+    значение (или пустое ``LLM_TEMPERATURE``) означает «не передавать параметр
+    вовсе», и это не каприз: часть моделей за OpenAI-совместимым окном
+    отвергает запрос с температурой целиком —
+
+        400 invalid_request_error: `temperature` is deprecated for this model
+
+    — то есть параметр, поставленный ради воспроизводимости, делает модель
+    полностью недоступной. Пропуск параметра оставляет серверное умолчание,
+    что хуже для воспроизводимости, но лучше, чем неработающий продукт.
+    """
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(
-        model=settings.llm_model,
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        temperature=settings.llm_temperature,
-        timeout=settings.llm_timeout,
-        max_retries=1,
-    )
+    options = {
+        "model": settings.llm_model,
+        "base_url": settings.llm_base_url,
+        "api_key": settings.llm_api_key,
+        "timeout": settings.llm_timeout,
+        "max_retries": 1,
+    }
+    if settings.llm_temperature >= 0:
+        options["temperature"] = settings.llm_temperature
+    return ChatOpenAI(**options)
 
 
 def strip_reasoning(text: str) -> str:

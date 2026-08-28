@@ -56,6 +56,9 @@ class Settings:
     llm_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "http://127.0.0.1:8081/v1"))
     llm_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", "not-needed-for-local"))
     llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "local"))
+    # ★Отрицательное значение означает «не передавать параметр серверу вовсе».
+    # Нужно для моделей, которые отвергают запрос с температурой целиком
+    # (400 invalid_request_error: `temperature` is deprecated for this model).
     llm_temperature: float = field(default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.1))
     llm_timeout: int = field(default_factory=lambda: _env_int("LLM_TIMEOUT", 300))
 
@@ -132,6 +135,32 @@ class Settings:
     # умолчанию — порядок, а не факт дня; при подключённом ряду поставщика
     # его следует брать из данных.
     global_supply_mb_d: float = field(default_factory=lambda: _env_float("GLOBAL_SUPPLY_MB_D", 102.0))
+
+    # ── Память диалога ─────────────────────────────────────────────────────
+    # Где хранятся ходы разговора между вопросами:
+    #   memory — в оперативной памяти процесса (умолчание): разговор живёт,
+    #            пока живёт процесс, на диск не попадает ничего;
+    #   sqlite — в файле, разговор переживает перезапуск;
+    #   off    — памяти нет, каждый вопрос отвечается с чистого листа.
+    #
+    # ★Умолчание НЕ на диске намеренно. Переписка с аналитиком — это данные
+    # заказчика, и решение о том, писать ли их на диск, принимает тот, кто
+    # разворачивает систему, а не тот, кто её писал.
+    conversation_memory: str = field(default_factory=lambda: _env("CONVERSATION_MEMORY", "memory"))
+    checkpoint_db: str = field(
+        default_factory=lambda: _env("CHECKPOINT_DB", str(ROOT / "data" / "conversations.sqlite"))
+    )
+    # Бюджет знаков на всю историю, попадающую в промпт. ★Жёсткое число, а не
+    # «сколько влезет»: контекст уже ронял систему один раз, и лимит обязан
+    # быть виден в конфигурации, а не выведен из размера окна модели.
+    # Старые ходы отбрасываются целиком, без пересказа: пересказ означал бы
+    # ещё один вызов модели и недетерминизм там, где его быть не должно.
+    history_budget_chars: int = field(default_factory=lambda: _env_int("HISTORY_BUDGET_CHARS", 4000))
+    # Потолок на ОДИН ход. Без него единственный длинный ответ съедает весь
+    # бюджет и вытесняет всю остальную историю.
+    history_turn_cap_chars: int = field(
+        default_factory=lambda: _env_int("HISTORY_TURN_CAP_CHARS", 1200)
+    )
 
     # ── Data locations ─────────────────────────────────────────────────────
     reports_dir: str = field(default_factory=lambda: _env("REPORTS_DIR", str(ROOT / "data" / "reports")))
