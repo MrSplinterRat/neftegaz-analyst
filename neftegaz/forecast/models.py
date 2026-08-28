@@ -285,11 +285,22 @@ def forecast(
     ``method="auto"`` prefers ARIMA and falls back to exponential smoothing if
     statsmodels is missing or the fit fails — a failed fit on a short or
     degenerate series is normal, and the caller still needs an answer.
+
+    ★``method="factors"`` НЕ входит в ``auto`` намеренно. Он строит прогноз из
+    баланса рынка (см. :mod:`neftegaz.forecast.factor_model`), а не из истории
+    цены, и требует корпуса отчётов. Молчаливый переход на него означал бы, что
+    пользователь получает ответ принципиально другой природы, не узнав об этом;
+    молчаливый откат С него — что заказанный метод подменили. Метод выбирается
+    явно, а его отказ — это отказ, а не повод подставить другой.
     """
     if method == "ses":
         return simple_exponential_smoothing(series, horizon, **kwargs)
     if method == "arima":
         return arima_forecast(series, horizon, **kwargs)
+    if method == "factors":
+        from neftegaz.forecast.factor_model import factor_forecast
+
+        return factor_forecast(series, horizon, **kwargs)
     if method != "auto":
         raise ValueError(f"unknown forecast method: {method!r}")
 

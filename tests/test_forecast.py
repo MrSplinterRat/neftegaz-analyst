@@ -232,21 +232,21 @@ def test_scenario_follows_the_constant_elasticity_curve(series):
     assert ratio == pytest.approx(expected, rel=1e-9)
 
 
-def test_small_shock_still_agrees_with_the_old_linear_calibration(series):
-    """Замена формы не должна терять прежнюю калибровку на малых шоках.
+def test_the_two_forms_agree_on_small_shocks_at_the_same_elasticity():
+    """Замена ФОРМЫ не должна была сама по себе менять ответ.
 
-    Линейная форма давала множитель ``1 − share·10``. На шоке в 1% мирового
-    предложения обе формы обязаны совпасть в пределах процента — иначе мы не
-    исправили функцию, а поменяли ответ.
+    Линейная форма давала множитель ``1 − share/|ε|``. На малом шоке степенная
+    обязана совпасть с ней в пределах процента — при ОДНОЙ И ТОЙ ЖЕ
+    эластичности. Сравнение идёт напрямую через ``price_multiplier``, а не через
+    сценарий, именно поэтому: сценарий теперь берёт эластичность из измерения на
+    корпусе, и разница в ответе там объясняется другим числом, а не другой
+    формулой. Смешивать эти две причины в одном тесте — значит не проверить ни
+    одну.
     """
-    base = simple_exponential_smoothing(series, horizon=5)
-    change = 1.02  # +1% предложения
-    glut = apply_supply_scenario(base, supply_change_mb_d=change, horizon_days=5)
-
-    share = change / settings.global_supply_mb_d
-    linear = 1.0 - share * 10.0
-    actual = float(glut.frame["forecast"].iloc[0] / base.frame["forecast"].iloc[0])
-    assert actual == pytest.approx(linear, rel=0.01)
+    elasticity = -0.10
+    share = 0.01  # 1% мирового предложения
+    linear = 1.0 - share / abs(elasticity)
+    assert price_multiplier(share, elasticity) == pytest.approx(linear, rel=0.01)
 
 
 def test_cut_moves_price_more_than_an_equal_increase(series):
@@ -286,22 +286,72 @@ def test_only_total_loss_of_supply_is_refused(series):
         apply_supply_scenario(base, supply_change_mb_d=-settings.global_supply_mb_d)
 
 
-def test_longer_horizon_dampens_the_price_move(series):
-    """На длинном горизонте спрос эластичнее, значит тот же шок двигает цену слабее."""
+@pytest.fixture
+def literature_mode(monkeypatch):
+    """Литературные числа вместо измеренных, для тестов о самой интерполяции."""
+    import dataclasses
+
+    import neftegaz.tools.forecast_tool as forecast_tool
+
+    patched = dataclasses.replace(
+        settings,
+        elasticity_source="literature",
+        demand_elasticity_short=-0.10,
+        demand_elasticity_long=-0.30,
+    )
+    monkeypatch.setattr(forecast_tool, "settings", patched)
+    forecast_tool.measured_elasticity.cache_clear()
+    yield patched
+    forecast_tool.measured_elasticity.cache_clear()
+
+
+def test_longer_horizon_dampens_the_price_move(series, literature_mode):
+    """Когда |ε| растёт с горизонтом, тот же шок двигает цену слабее.
+
+    ⚠Проверяется на ЛИТЕРАТУРНЫХ числах, а не на измеренных, и это не уловка.
+    Измерение дало короткий конец −0.31 против литературного длинного −0.30 —
+    то есть на наших данных горизонты почти НЕ РАЗЛИЧАЮТСЯ, и утверждать
+    обратное было бы выдачей желаемого за измеренное. Здесь проверяется, что
+    интерполяция работает так, как задумана, при заданных ей числах.
+    """
     base = simple_exponential_smoothing(series, horizon=5)
     near = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=30)
     far = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=1825)
     assert float(near.frame["forecast"].iloc[0]) > float(far.frame["forecast"].iloc[0])
 
 
-def test_elasticity_saturates_outside_the_interpolation_range():
+def test_elasticity_saturates_outside_the_interpolation_range(literature_mode):
     """За пределами заданных горизонтов эластичность не экстраполируется."""
-    assert elasticity_for_horizon(1) == settings.demand_elasticity_short
-    assert elasticity_for_horizon(10_000) == settings.demand_elasticity_long
+    assert elasticity_for_horizon(1) == literature_mode.demand_elasticity_short
+    assert elasticity_for_horizon(10_000) == literature_mode.demand_elasticity_long
     middle = elasticity_for_horizon(
-        (settings.elasticity_short_days + settings.elasticity_long_days) // 2
+        (literature_mode.elasticity_short_days + literature_mode.elasticity_long_days) // 2
     )
-    assert settings.demand_elasticity_long < middle < settings.demand_elasticity_short
+    assert (
+        literature_mode.demand_elasticity_long
+        < middle
+        < literature_mode.demand_elasticity_short
+    )
+
+
+def test_measured_elasticity_replaces_the_literature_value_on_the_short_end():
+    """Ради этого задача и делалась: короткий конец больше не литературный.
+
+    На корпусе оценка выходит около −0.31 против литературных −0.10, потому что
+    формуле нужна эластичность рыночного клиринга, а не спроса: разрыв
+    закрывается ещё и расходом запасов.
+    """
+    from neftegaz.tools.forecast_tool import measured_elasticity
+
+    estimate = measured_elasticity()
+    if estimate is None:
+        pytest.skip("корпус отчётов недоступен — измерять нечего")
+
+    assert estimate.usable
+    assert elasticity_for_horizon(1) == estimate.value
+    # Клиринг по модулю заметно больше спроса: если это перестанет выполняться,
+    # значит оценивается уже не та величина.
+    assert abs(estimate.value) > 0.15
 
 
 def test_scenario_widens_the_band_relative_to_the_line(series):

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 
 import pandas as pd
 
@@ -33,8 +34,36 @@ __all__ = [
     "run_forecast",
     "apply_supply_scenario",
     "elasticity_for_horizon",
+    "measured_elasticity",
     "price_multiplier",
 ]
+
+
+@lru_cache(maxsize=1)
+def measured_elasticity():
+    """Эластичность клиринга, оценённая на корпусе, или ``None``.
+
+    Кэшируется на процесс: оценка требует разбора всех отчётов корпуса (около
+    трёх секунд), а меняется она только при пополнении корпуса — то есть между
+    запусками, а не между вопросами.
+
+    ``None`` возвращается в трёх случаях, и все три — законные состояния, а не
+    сбои: режим ``literature`` выбран настройкой; корпуса нет или он мал;
+    оценка вышла непригодной (положительная либо с интервалом через ноль).
+    Тогда расчёт берёт литературное число и говорит об этом в ответе.
+    """
+    if settings.elasticity_source.strip().lower() != "measured":
+        return None
+    try:
+        from neftegaz.forecast.elasticity import estimate_clearing_elasticity
+        from neftegaz.forecast.factors import load_factors
+
+        estimate = estimate_clearing_elasticity(load_factors().actuals)
+    except Exception:  # noqa: BLE001 — нечитаемый корпус не должен ронять расчёт
+        return None
+    if estimate is None or not estimate.usable:
+        return None
+    return estimate
 
 
 def elasticity_for_horizon(horizon_days: int) -> float:
@@ -48,7 +77,12 @@ def elasticity_for_horizon(horizon_days: int) -> float:
     Прежняя версия этого модуля горизонт игнорировала: прогноз на неделю и на
     год сдвигались одинаково. Это заведомо неверно для обоих концов.
     """
-    short = settings.demand_elasticity_short
+    measured = measured_elasticity()
+    # Измерение заменяет КОРОТКИЙ конец: оно получено на квартальных разностях,
+    # то есть говорит именно о ближнем горизонте. Длинного горизонта в корпусе
+    # нет, и подставлять туда квартальную оценку значило бы выдать измерение за
+    # то, чем оно не является.
+    short = measured.value if measured is not None else settings.demand_elasticity_short
     long_run = settings.demand_elasticity_long
     h_short = settings.elasticity_short_days
     h_long = settings.elasticity_long_days
@@ -118,6 +152,12 @@ class ForecastReport:
     upper: float
     interpretation: str
     scenario: str | None
+    # Прогноз, построенный ДРУГИМ ПО ПРИРОДЕ методом — по балансу рынка, а не по
+    # истории цены. Едет вместе с основным намеренно: два метода, экстраполирующих
+    # один и тот же ряд, согласятся почти всегда, и их согласие ничего не
+    # доказывает. Согласие с методом, который смотрит на добычу и запасы, —
+    # доказывает; расхождение с ним столь же информативно и должно быть видно.
+    second_opinion: str | None
     frame: pd.DataFrame
 
     def as_text(self) -> str:
@@ -132,6 +172,8 @@ class ForecastReport:
         ]
         if self.scenario:
             lines.append(f"Сценарий: {self.scenario}")
+        if self.second_opinion:
+            lines.append(f"Второе мнение: {self.second_opinion}")
         lines.append("")
         lines.append(self.interpretation)
         return "\n".join(lines)
@@ -164,8 +206,12 @@ def apply_supply_scenario(
     elasticity = elasticity_for_horizon(horizon)
 
     central = price_multiplier(share, elasticity)
-    # Край литературного диапазона: отклик сильнее нашей центральной оценки.
-    edge = price_multiplier(share, settings.demand_elasticity_band)
+    # Край диапазона неопределённости: отклик сильнее центральной оценки. При
+    # измерении берётся ближний конец доверительного интервала — то есть коридор
+    # расширяется ровно на то, насколько плохо мы знаем саму эластичность.
+    measured = measured_elasticity()
+    band = measured.ci_high if measured is not None else settings.demand_elasticity_band
+    edge = price_multiplier(share, band)
     low, high = (central, edge) if central <= edge else (edge, central)
 
     shifted = result.frame.copy()
@@ -180,11 +226,46 @@ def apply_supply_scenario(
             **result.params,
             "supply_change_mb_d": supply_change_mb_d,
             "elasticity": elasticity,
-            "elasticity_band": settings.demand_elasticity_band,
+            "elasticity_band": band,
+            "elasticity_measured": measured is not None,
             "price_multiplier": central,
         },
         residual_sigma=result.residual_sigma * central,
         n_observations=result.n_observations,
+    )
+
+
+def _second_opinion(series, horizon_days: int, primary) -> str | None:
+    """Прогноз по балансу рынка рядом с прогнозом по истории цены.
+
+    Возвращает ``None``, только когда факторный метод неприменим В ПРИНЦИПЕ —
+    метод основной уже и есть факторный. Во всех остальных случаях возвращается
+    строка: либо второй прогноз, либо причина, по которой его нет. ★Отсутствие
+    второго мнения без объяснения читалось бы как «методы согласны», а это самое
+    вредное из возможных умолчаний.
+    """
+    if primary.method.startswith("factor model"):
+        return None
+    try:
+        from neftegaz.forecast.factor_model import factor_forecast
+
+        other = factor_forecast(series, horizon_days)
+    except Exception as exc:  # noqa: BLE001 — причина едет в ответ, а не в лог
+        return f"прогноз по балансу рынка не построен ({exc})"
+
+    row = other.frame.iloc[-1]
+    mine = float(primary.frame.iloc[-1]["forecast"])
+    theirs = float(row["forecast"])
+    gap = (theirs - mine) / mine * 100.0
+    return (
+        f"по балансу рынка (добыча и запасы из прогноза EIA, R²={other.params['r_squared']:.2f} "
+        f"на {other.params['quarters_fitted']} кварталах) на том же горизонте — "
+        f"{theirs:.2f} долл./барр., 95% интервал {row['lower']:.2f} — {row['upper']:.2f}; "
+        f"это на {gap:+.1f}% от прогноза по истории цены. "
+        f"★Методы РАЗНЫЕ ПО ПРИРОДЕ: первый экстраполирует ряд цены, второй "
+        f"переводит в цену прогноз добычи и запасов. Расхождение означает, что "
+        f"рынок и балансовый прогноз EIA сейчас говорят разное, и это содержательный "
+        f"факт, а не погрешность."
     )
 
 
@@ -222,17 +303,32 @@ def run_forecast(
         # ★Число не отпускается без указания, на чём оно стоит. Сценарная ветка
         # опирается на допущение, которого нет в наших данных, и пользователь
         # обязан видеть это рядом с цифрой, а не в документации.
+        measured = measured_elasticity()
+        if measured is not None:
+            origin = (
+                f"ИЗМЕРЕНА на корпусе отчётов ({measured.method}, наблюдений: "
+                f"{measured.n_observations}, 95% ДИ {measured.ci_low:.2f} … "
+                f"{measured.ci_high:.2f})"
+            )
+        else:
+            origin = "ОЦЕНКА ИЗ ЛИТЕРАТУРЫ, а не измерение на наших данных"
+        band = result.params["elasticity_band"]
         scenario_text = (
             f"{direction} предложения на {abs(supply_change_mb_d):.2f} млн барр./сут "
             f"({abs(share_pct):.1f}% мирового предложения, принятого равным "
             f"{settings.global_supply_mb_d:.0f} млн барр./сут) "
             f"⇒ цена ×{multiplier:.3f}. "
-            f"Допущение: эластичность спроса по цене {elasticity:.2f} на горизонте "
-            f"{horizon_days} дн. Это ОЦЕНКА ИЗ ЛИТЕРАТУРЫ, а не измерение на наших "
-            f"данных; коридор расширен до края диапазона ({settings.demand_elasticity_band:.2f}), "
-            f"поэтому граница со стороны сильного отклика отражает неопределённость "
-            f"самого допущения."
+            f"Допущение: эластичность рыночного клиринга {elasticity:.2f} на горизонте "
+            f"{horizon_days} дн. — на сколько процентов должна сдвинуться цена, чтобы "
+            f"рынок поглотил сдвиг предложения на процент. Она {origin}. "
+            f"★Это НЕ эластичность спроса ({settings.demand_elasticity_long:.2f} и подобные "
+            f"числа из литературы): между ними стоит буфер запасов, который гасит ценовой "
+            f"отклик, и подстановка одной вместо другой завышает движение цены втрое. "
+            f"Коридор расширен до края диапазона ({band:.2f}), поэтому граница со стороны "
+            f"сильного отклика отражает неопределённость самого допущения."
         )
+
+    second_opinion = _second_opinion(series, horizon_days, result)
 
     last_row = result.frame.iloc[-1]
     return ForecastReport(
@@ -248,5 +344,6 @@ def run_forecast(
         upper=float(last_row["upper"]),
         interpretation=result.interpretation(instrument),
         scenario=scenario_text,
+        second_opinion=second_opinion,
         frame=result.frame,
     )
