@@ -305,7 +305,7 @@ def literature_mode(monkeypatch):
     forecast_tool.measured_elasticity.cache_clear()
 
 
-def test_longer_horizon_dampens_the_price_move(series, literature_mode):
+def test_longer_horizon_dampens_the_price_move(series, literature_mode):  # noqa: ARG001
     """Когда |ε| растёт с горизонтом, тот же шок двигает цену слабее.
 
     ⚠Проверяется на ЛИТЕРАТУРНЫХ числах, а не на измеренных, и это не уловка.
@@ -389,3 +389,72 @@ def test_positive_elasticity_is_rejected():
 def test_zero_scenario_is_identity(series):
     base = simple_exponential_smoothing(series, horizon=5)
     assert apply_supply_scenario(base, 0.0) is base
+
+
+# ── подача сценария: множитель и результат его применения ──────────────────
+#
+# Дефект найден не тестом и не чтением кода, а прогоном демо: модель прочитала
+# «⇒ цена ×1.049» рядом с уже сдвинутым прогнозом 97.21, приняла множитель за
+# неприменённый и напечатала 101.98. Расчёт был верен, ошиблась ПОДАЧА — число
+# и результат его применения стояли рядом без указания порядка.
+
+
+def test_baseline_point_survives_the_scenario(series):
+    """Точка ДО сдвига обязана остаться доступной.
+
+    Без неё в отчёте есть только результат и множитель, а обратное деление
+    читатель делать не станет — он умножит ещё раз.
+    """
+    base = simple_exponential_smoothing(series, horizon=5)
+    cut = apply_supply_scenario(base, supply_change_mb_d=-2.0, horizon_days=5)
+    baseline = cut.params["baseline_point"]
+    assert baseline == pytest.approx(float(base.frame["forecast"].iloc[-1]))
+    assert float(cut.frame["forecast"].iloc[-1]) == pytest.approx(
+        baseline * cut.params["price_multiplier"]
+    )
+
+
+def test_report_says_the_multiplier_is_already_applied(series, tmp_path):
+    """Отчёт обязан сказать это словами, а не оставить на догадку читателя."""
+    import neftegaz.tools.forecast_tool as tool
+
+    frame = pd.DataFrame(
+        {"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()}
+    )
+    path = tmp_path / "prices.csv"
+    frame.to_csv(path, index=False)
+
+    with_scenario = tool.run_forecast(
+        horizon_days=30, method="ses", supply_change_mb_d=-1.5, prices_csv=str(path)
+    )
+    without = tool.run_forecast(horizon_days=30, method="ses", prices_csv=str(path))
+    text = with_scenario.as_text()
+
+    assert "УЖЕ ПРИМЕНЁН" in text
+    assert "ещё раз НЕ НУЖНО" in text
+    # ★Базовая цифра НАЗВАНА в тексте — та самая, что даёт прогноз без сценария.
+    # Иначе читателю пришлось бы восстанавливать её делением, а он вместо этого
+    # умножает.
+    assert f"{without.point:.2f} долл./барр." in text
+
+
+def test_scenario_numbers_are_marked_at_the_line_itself(series, tmp_path):
+    """Пометка стоит у самой цифры: абзацем ниже её связывают не всегда."""
+    import neftegaz.tools.forecast_tool as tool
+
+    frame = pd.DataFrame(
+        {"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()}
+    )
+    path = tmp_path / "prices.csv"
+    frame.to_csv(path, index=False)
+
+    with_scenario = tool.run_forecast(
+        horizon_days=30, method="ses", supply_change_mb_d=-1.5, prices_csv=str(path)
+    ).as_text()
+    without = tool.run_forecast(
+        horizon_days=30, method="ses", prices_csv=str(path)
+    ).as_text()
+
+    assert "множитель уже учтён" in with_scenario
+    # Без сценария пометки быть не должно: она сообщала бы о том, чего не было.
+    assert "множитель уже учтён" not in without

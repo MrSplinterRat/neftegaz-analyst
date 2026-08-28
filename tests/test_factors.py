@@ -199,7 +199,7 @@ def price_history() -> pd.Series:
     return pd.Series(90 + rng.normal(0, 1.0, 400), index=index, name="close")
 
 
-def test_factor_forecast_starts_at_the_last_known_price(price_history, corpus):
+def test_factor_forecast_starts_at_the_last_known_price(price_history, corpus):  # noqa: ARG001
     """Прогноз обязан начинаться от рынка, а не от квартальной средней.
 
     Иначе первый же день расходится с последней ценой на несколько долларов без
@@ -212,7 +212,7 @@ def test_factor_forecast_starts_at_the_last_known_price(price_history, corpus):
     assert first == pytest.approx(float(price_history.iloc[-1]), rel=0.05)
 
 
-def test_factor_forecast_refuses_beyond_the_projected_quarters(price_history, corpus):
+def test_factor_forecast_refuses_beyond_the_projected_quarters(price_history, corpus):  # noqa: ARG001
     """За горизонтом прогноза EIA метод отказывается, а не продолжает линию."""
     from neftegaz.forecast.factor_model import factor_forecast
 
@@ -220,7 +220,7 @@ def test_factor_forecast_refuses_beyond_the_projected_quarters(price_history, co
         factor_forecast(price_history, horizon=2000)
 
 
-def test_factor_forecast_band_counts_both_sources_of_error(price_history, corpus):
+def test_factor_forecast_band_counts_both_sources_of_error(price_history, corpus):  # noqa: ARG001
     """Полоса обязана учитывать и ошибку модели, и ошибку прогноза факторов.
 
     Остаток регрессии отвечает лишь на вопрос «точно ли модель переводит факторы

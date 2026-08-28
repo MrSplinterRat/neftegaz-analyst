@@ -169,7 +169,7 @@ def test_threads_do_not_leak_into_each_other(offline_graph):
     assert len(other["history"]) == 1
 
 
-def test_memory_off_starts_every_question_clean(monkeypatch, offline_graph):
+def test_memory_off_starts_every_question_clean(monkeypatch, offline_graph):  # noqa: ARG001
     use_settings(monkeypatch, conversation_memory="off")
     assert build_checkpointer() is None
 
