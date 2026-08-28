@@ -133,6 +133,67 @@ def test_band_is_finite_on_short_series(length):
     assert np.isfinite(result.residual_sigma)
 
 
+@pytest.mark.parametrize("horizon", [90, 365, 1825, 5000])
+@pytest.mark.parametrize("method", ["ses", "arima"])
+def test_band_never_reaches_a_negative_price(series, method, horizon):
+    """Цена ограничена снизу нулём, и коридор обязан это знать.
+
+    Аддитивный интервал ``точка ± z·σ·√h`` рос без границы и печатал
+    отрицательную цену: на реальном ряде Brent сглаживание давало нижнюю
+    границу −1.98 долл./барр. уже на годе и −119.54 на пяти годах. Обрезать
+    вывод по нулю было бы лечением печати, а не модели, поэтому интервал
+    строится в логарифмах и положителен по построению.
+    """
+    result = forecast(series, horizon=horizon, method=method)
+    assert (result.frame["lower"] > 0).all()
+
+
+def test_band_is_asymmetric_around_the_point(series):
+    """Вверх цена может уйти в разы, вниз только до нуля.
+
+    Аддитивная форма утверждала обратное — что отклонения равновероятны в обе
+    стороны на любую величину.
+    """
+    result = simple_exponential_smoothing(series, horizon=365)
+    row = result.frame.iloc[-1]
+    up = float(row["upper"] - row["forecast"])
+    down = float(row["forecast"] - row["lower"])
+    assert up > down
+
+
+def test_arima_fits_on_logs_and_converges(series):
+    """Подгонка идёт по логарифму цены, и она обязана СОЙТИСЬ.
+
+    Масштаб здесь не косметика: по голому логарифму оптимизатор обрывается на
+    первой итерации с converged=False, не бросая исключения, — то есть
+    ``forecast(method="auto")`` этого не замечает и возвращает числа, похожие
+    на нормальный ответ. Поэтому и сходимость едет в params, и тест на неё есть.
+    """
+    result = arima_forecast(series, horizon=30)
+    assert result.params["fitted_on_logs"] is True
+    assert result.params["converged"] is True
+
+
+def test_arima_falls_back_to_levels_on_non_positive_prices():
+    """Логарифм неопределён на нуле — подгонка честно уходит в уровни."""
+    index = pd.date_range("2026-01-01", periods=40, freq="D", name="date")
+    values = pd.Series(np.linspace(-5.0, 5.0, 40), index=index)
+    result = arima_forecast(values, horizon=5)
+    assert result.params["fitted_on_logs"] is False
+    assert np.isfinite(result.frame.to_numpy()).all()
+
+
+def test_residual_sigma_stays_in_dollars(series):
+    """Сигма печатается пользователю с единицей измерения — она не логарифм.
+
+    Логарифмическая сигма этого ряда около 0.02; долларовая — единицы. Тест
+    ловит подмену, которая в тексте ответа выглядела бы просто маленьким числом.
+    """
+    result = arima_forecast(series, horizon=30)
+    assert result.residual_sigma > 0.5
+    assert "USD/bbl" in result.interpretation()
+
+
 def test_horizon_must_be_positive(series):
     with pytest.raises(ValueError):
         forecast(series, horizon=0)
