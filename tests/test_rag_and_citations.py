@@ -90,6 +90,36 @@ def test_caption_is_bounded_by_digits_not_by_length():
     assert found.group(0).strip() == _CAPTION
 
 
+def test_a_formula_inside_a_word_stays_in_the_caption():
+    """★Цифра, приклеенная к букве, — часть названия, а не начало данных.
+
+    «Table 9a. U.S. Macroeconomic Indicators and CO2 Emissions» обрывался на
+    «and CO», и обрывался ВСЕГДА: все 312 фрагментов этой таблицы в индексе
+    несли подпись без формулы, то есть фрагмент про выбросы не содержал слова
+    CO2 ни в подписи, ни в эмбеддинге.
+    """
+    from neftegaz.rag.chunking import TABLE_CAPTION
+
+    caption = "Table 9a. U.S. Macroeconomic Indicators and CO2 Emissions"
+    found = TABLE_CAPTION.search(f"{caption}\nFood ..... 104.0 104.1")
+    assert found is not None
+    assert found.group(0).strip() == caption
+
+
+def test_a_digit_after_a_space_still_ends_the_caption():
+    """★Отрицательный контроль к предыдущему, и он несёт всю осторожность правки.
+
+    Послабление обязано пройти по границе «цифра после БУКВЫ», а не «цифра
+    вообще»: иначе шапка колонок, стоящая на той же строке, утечёт в заголовок и
+    вернётся ровно та ошибка, ради которой цифры были запрещены.
+    """
+    from neftegaz.rag.chunking import TABLE_CAPTION
+
+    found = TABLE_CAPTION.search("Table 2. Energy Prices 2025Q1 2025Q2 2025Q3 2.55 2.54")
+    assert found is not None
+    assert found.group(0).strip() == "Table 2. Energy Prices"
+
+
 def test_continuation_chunk_receives_the_table_caption():
     stream = _CAPTION + " " + "United States .... 13.21 13.45 13.60 " * 30
     chunks = chunk_pages([{"page": 1, "text": stream}], size=300, overlap=50)
