@@ -19,6 +19,7 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from neftegaz.agent import prompts
 from neftegaz.agent.llm import ask
+from neftegaz.agent.scenario import read_supply_scenario
 from neftegaz.config import settings
 
 __all__ = [
@@ -238,48 +239,15 @@ def parse_horizon_days(question: str, default: int = 90) -> int:
 
 
 def parse_supply_change(question: str) -> float:
-    """Extract a supply scenario in million barrels per day, if stated.
+    """Величина сценария в млн барр./сут; 0.0, если сценария нет.
 
-    Returns 0.0 when no scenario is present. Negative means a cut.
+    ★Тонкая обёртка над :func:`neftegaz.agent.scenario.read_supply_scenario`,
+    оставленная ради вызывающих, которым довольно числа. Читать ТОЛЬКО её
+    недостаточно: возвращаемый ноль означает и «сценария нет», и «сценарий
+    назван, но не прочитан», а это разные вещи, и вторую надо произнести вслух.
+    Кто принимает решение — берёт полный ответ, а не это число.
     """
-    lowered = question.lower()
-    found = re.search(r"(\d+[.,]?\d*)\s*млн\s*барр", lowered)
-    if not found:
-        return 0.0
-    magnitude = float(found.group(1).replace(",", "."))
-    is_cut = any(word in lowered for word in CUT_WORDS)
-    return -magnitude if is_cut else magnitude
-
-
-# Корни слов, означающих сокращение предложения. ★Список корней, а не слов:
-# «сокращение» и «сократит» — разные корни («сокращ» и «сократ»), и пропуск
-# второго стоил конкретного дефекта. На вопросе «а если ОПЕК+ СОКРАТИТ добычу
-# на 2 млн барр./сут?» расчёт посчитал сценарий УВЕЛИЧЕНИЯ предложения и выдал
-# падение цены вместо роста — то есть ответ, противоположный вопросу.
-#
-# ★Ошибка знака здесь дороже, чем ошибка величины: диапазон «на сколько» читатель
-# перепроверит, направление — примет на веру. Поэтому корни перечислены с запасом,
-# и берутся полные, различающие формы: «пад» вошло бы в слово «западный».
-CUT_WORDS = (
-    "сокращ",
-    "сократ",
-    "снижен",
-    "сниз",
-    "уменьш",
-    "срез",
-    "урез",
-    "упад",
-    "паден",
-    "выпаден",
-    "потер",
-    "выбыт",
-    "останов",
-    "сверн",
-    "cut",
-    "reduc",
-    "decline",
-    "drop",
-)
+    return read_supply_scenario(question).value_mb_d
 
 
 # ★БЮДЖЕТ КОНТЕКСТА В ЗНАКАХ, А НЕ НАДЕЖДА НА ТО, ЧТО ВЛЕЗЕТ.
@@ -474,12 +442,26 @@ def node_forecast(state: AgentState) -> AgentState:
     # должно быть НАЗВАНО, иначе оно искажает ответ незаметно.
     horizon = parse_horizon_days(question, default=state.get("last_horizon_days", 90))
     requested = requested_horizon_days(question)
+    scenario = read_supply_scenario(question)
     try:
         report = run_forecast(
             horizon_days=horizon,
-            supply_change_mb_d=parse_supply_change(question),
+            supply_change_mb_d=scenario.value_mb_d,
         )
         text = report.as_text()
+        if scenario.unreadable:
+            # ★Тот же принцип, что у потолка горизонта абзацем ниже, и та же
+            # причина: молчание тут неотличимо от согласия. Спросив «а если
+            # ОПЕК+ сократит на 5%» и получив обычный прогноз, человек читает
+            # его как ОТВЕТ НА СВОЙ ВОПРОС — а это базовый расчёт, к сценарию
+            # отношения не имеющий. Прежний разбор возвращал в таких случаях
+            # ноль, и ошибка была совершенно беззвучной.
+            text += (
+                f"\n\n★Сценарий в вопросе назван, но не прочитан: {scenario.note}. "
+                f"Числа выше — БАЗОВЫЙ прогноз, изменение предложения в них не "
+                f"учтено. Назови величину одним значением и единицей — например "
+                f"«сокращение на 2 млн барр./сут» или «сокращение на 2%»."
+            )
         if requested is not None and requested > horizon:
             # ★Урезание запроса объявляется вслух. Спросив пять лет и получив
             # «горизонт 730 дн.», человек читает это как ответ на свой вопрос —
