@@ -111,6 +111,11 @@ class AgentState(TypedDict, total=False):
     # («на 2 млн барр./сут» — про что?), и смысл ему даёт только тот вопрос,
     # который его вызвал. Пустая строка значит «ничего не висит».
     pending_question: str
+    # Состояние поиска по отчётам, когда он ничего не дал. Пустая строка значит
+    # «поиск прошёл нормально»; "empty" — индекс не построен; "failed: причина" —
+    # поиск отказал. Без этого поля все три вида пустоты выглядели одним, и
+    # «я не смог» уходило в ответ как «этого нет».
+    reports_status: str
     # Ходы разговора. Аннотация задаёт reducer: LangGraph не заменяет поле
     # новым значением, а прогоняет старое и новое через merge_history.
     history: Annotated[list[dict], merge_history]
@@ -482,14 +487,37 @@ def parse_route(verdict: str, default: str = "industry") -> str:
 
 
 def node_retrieve(state: AgentState) -> AgentState:
-    """Search the report corpus. This always runs first for industry questions."""
+    """Search the report corpus. This always runs first for industry questions.
+
+    ★ПУСТАЯ ВЫДАЧА БЫВАЕТ ТРЁХ РАЗНЫХ ВИДОВ, и раньше все три выглядели одним.
+    Узел ловил любое исключение, отдавал пустой список, и дальше по конвейеру в
+    промпт уходило «поиск по базе отчётов выполнен, релевантных фрагментов не
+    найдено» — то есть УТВЕРЖДЕНИЕ, что поиск состоялся и корпус промолчал.
+    Модель, честно следуя правилу, писала человеку «в отчётах этого нет».
+
+    Виды такие:
+
+    * поиск прошёл, корпус этого не содержит — законный исход, ответ идёт в веб;
+    * индекс не построен вовсе — состояние установки, а не свойство корпуса;
+    * поиск отказал — сломанная коллекция, недоступный процесс, нехватка памяти.
+
+    Второй и третий — это «я не смог», выданное за «этого нет»: тот же класс
+    отказа, ради которого писан разбор сценария, и прямое нарушение приоритета
+    источников (требование 2.4), беззвучное, потому что ответ приходит из веба и
+    выглядит обычным. Поэтому состояние возвращается ЗНАЧЕНИЕМ и едет дальше —
+    и в промпт, и в текст ответа.
+    """
     from neftegaz.rag.store import get_store
 
     try:
-        hits = get_store().search(state["question"])
-    except Exception:  # noqa: BLE001 - an unbuilt index is a normal first-run state
-        hits = []
-    return {"report_hits": hits, "used_reports": bool(hits)}
+        store = get_store()
+        hits = store.search(state["question"])
+        # Считаем точки только когда искать было негде: на обычном пути это
+        # лишний запрос к хранилищу, а ответа он не меняет.
+        status = "" if hits else ("empty" if store.count() == 0 else "")
+    except Exception as exc:  # noqa: BLE001 - отказ поиска не вправе убить ответ
+        return {"report_hits": [], "used_reports": False, "reports_status": f"failed: {exc}"}
+    return {"report_hits": hits, "used_reports": bool(hits), "reports_status": status}
 
 
 def node_web(state: AgentState) -> AgentState:
@@ -575,12 +603,18 @@ def node_answer(state: AgentState) -> AgentState:
     # but it is a source of a *different kind*, so it gets its own section and
     # its own citation format rather than being folded into the report context.
     forecast_text = state.get("forecast_text", "")
+    reports_status = state.get("reports_status", "")
 
     try:
         answer = ask(
             prompts.SYSTEM_PROMPT,
             prompts.build_answer_prompt(
-                question, report_context, web_context, forecast_text, history_context
+                question,
+                report_context,
+                web_context,
+                forecast_text,
+                history_context,
+                reports_status,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -592,6 +626,11 @@ def node_answer(state: AgentState) -> AgentState:
             if fallback
             else f"Языковая модель недоступна: {exc}"
         )
+    # ★Оговорку про недоступную базу отчётов дописывает КОД, а не модель.
+    # Сказанное модели доходит до человека только пересказом, а пересказчик
+    # вправе счесть оговорку неважной и потерять её. То, каким источником
+    # получен ответ, проверяющий обязан увидеть буквально.
+    answer += prompts.reports_status_note(reports_status)
     # Ход дописывается в историю здесь, в единственном месте, где разговор
     # действительно состоялся: вопрос задан и ответ получен.
     return {"answer": answer, "history": [{"question": question, "answer": answer}]}
