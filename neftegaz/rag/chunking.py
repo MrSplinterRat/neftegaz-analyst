@@ -13,6 +13,7 @@ and measurably hurts retrieval on reports whose paragraphs run across pages.
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import asdict, dataclass
 
@@ -121,7 +122,7 @@ _VALUE_TOKEN = re.compile(r"^(?:-?[\d,]+(?:\.\d+)?|-)$")
 ROW_LABEL_WINDOW = 100
 
 
-def table_rows(stream: str) -> list[tuple[int, int]]:
+def table_rows(stream: str, barriers: list[tuple[int, str]] | None = None) -> list[tuple[int, int]]:
     """Границы строк таблиц в потоке: список пар (начало подписи, конец чисел).
 
     ★ЗАЧЕМ ОТДЕЛЬНЫМИ ФРАГМЕНТАМИ. Замерено: строка «United States … 13.28 13.51
@@ -137,15 +138,47 @@ def table_rows(stream: str) -> list[tuple[int, int]]:
     обрубок: у строки «Natural gas (dollars per million Btu) …» ближайшая
     заглавная — это «B», и подписью становится «Btu)».
 
+    ★ЗАГОЛОВОК ТАБЛИЦЫ И ЕЁ РАЗДЕЛ — ПРЕГРАДЫ, КОТОРЫЕ ГРАНИЦА НЕ ПЕРЕХОДИТ.
+    Отсчёт от последнего числа молча уезжает в предыдущую строку, когда чисел в
+    окне нет, — и это бывает верно, и бывает неверно, а по виду не отличается.
+    Замер на отчёте за июль 2026: у 201 строки из 938 подпись переходит через
+    перевод строки; 127 переходов законны (имя показателя, у которого единицы и
+    числа стоят на следующей строке: «Dry Natural Gas Production» + «(billion
+    cubic feet per day) …»), а 74 съедают название раздела — «Energy Production
+    Crude Oil Production (a) …» вместо «Crude Oil Production (a) …».
+
+    ★Съеденный раздел портит вдвойне. Подпись строки перестаёт быть подписью
+    строки, и та же самая тема приезжает ВТОРОЙ раз — раздел уже стоит в
+    контексте фрагмента отдельным полем. Различить законный переход от
+    незаконного изнутри текста нельзя: обе предыдущие строки выглядят как
+    короткая строка без чисел. Различает знание СНАРУЖИ — какие места потока
+    являются заголовками и разделами; оно уже добыто разбором геометрии, и
+    ``barriers`` их сюда приносит.
+
     Возвращаются именно ГРАНИЦЫ, а не текст: фрагмент обязан быть дословной
     подстрокой потока, иначе ссылка на страницу перестанет быть проверяемой.
     """
+    stops = sorted(barriers or ())
+    starts = [position for position, _ in stops]
     spans: list[tuple[int, int]] = []
     for dots in _DOTS.finditer(stream):
         window_start = max(0, dots.start() - ROW_LABEL_WINDOW)
         window = stream[window_start : dots.start()]
         numbers = list(_NUMBER.finditer(window))
         label_start = window_start + (numbers[-1].end() if numbers else 0)
+        # Преграда, попавшая между началом подписи и точками, сдвигает начало за
+        # свой конец: подпись строки не вправе включать чужой заголовок.
+        place = bisect.bisect_right(starts, label_start)
+        # ★Преграда бывает НАЧАТА ЛЕВЕЕ границы и накрывать её собой: последнее
+        # число окна стоит внутри самого названия раздела («Industrial Production
+        # Indices (Index, 2017=100)» → граница садится на «)»). Такую преграду
+        # поиск по началу не находит, и раздел въезжал в подпись обрубком — 15
+        # строк из 938 на отчёте за июль 2026, включая предельный случай Table 9a.
+        if place and stops[place - 1][0] + len(stops[place - 1][1]) > label_start:
+            place -= 1
+        while place < len(stops) and starts[place] < dots.start():
+            label_start = max(label_start, stops[place][0] + len(stops[place][1]))
+            place += 1
         while label_start < dots.start() and stream[label_start] in " \t\n":
             label_start += 1
         if label_start >= dots.start():
@@ -550,7 +583,11 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
     # одной стране перестаёт тонуть среди десятка других. Одно и то же место
     # отчёта оказывается в индексе дважды, в двух разрешениях — и это замысел,
     # а не дублирование по недосмотру.
-    for row_start, row_end in table_rows(stream):
+    # Преграды для границы подписи: заголовки таблиц и их разделы. Заголовок в
+    # подпись строки не съезжал ни разу (замер: 0 из 938), но и не должен —
+    # условие стоит там же, где раздел, потому что различает их только вид
+    # текста, а вид — не гарантия.
+    for row_start, row_end in table_rows(stream, sorted(captions + block_positions)):
         chunks.append(
             Chunk(
                 index=len(chunks),

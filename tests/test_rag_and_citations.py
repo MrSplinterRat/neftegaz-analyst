@@ -204,6 +204,69 @@ def test_row_label_is_whole_not_truncated_to_last_capital():
     assert gas[0].startswith("Natural gas"), gas[0]
 
 
+# ── граница подписи не переходит заголовок и раздел ────────────────────────
+# Отсчёт от последнего числа уезжает в предыдущую строку, когда чисел в окне
+# нет. Замер на отчёте за июль 2026: так делают 201 строка из 938, и 74 из них
+# съедали название раздела — «Energy Production Crude Oil Production (a) …»
+# вместо «Crude Oil Production (a) …».
+
+_SECTION_STREAM = (
+    "Industrial Production Indices (Index, 2017=100)\n"
+    "Total Industrial Production ..... 102.2 102.3 107.1 104.8 105.9\n"
+)
+
+
+def _first_row(stream: str, barriers=None) -> str:
+    from neftegaz.rag.chunking import table_rows
+
+    spans = table_rows(stream, barriers)
+    assert spans, stream
+    return stream[spans[0][0] : spans[0][1]]
+
+
+def test_the_label_does_not_swallow_the_section_above_it():
+    """Раздел без единой цифры — самый частый случай: 74 строки из 938.
+
+    Без преграды подпись начинается на разделе, потому что чисел в окне нет
+    вовсе и граница уезжает до края окна.
+    """
+    stream = "Energy Production\nCrude Oil Production (a) ..... 13.28 13.51 13.78 13.61\n"
+    assert _first_row(stream).startswith("Energy Production"), "проверка не различает"
+    assert _first_row(stream, [(0, "Energy Production")]).startswith("Crude Oil Production")
+
+
+def test_the_label_does_not_swallow_a_section_that_ends_in_digits():
+    barriers = [(0, "Industrial Production Indices (Index, 2017=100)")]
+    assert _first_row(_SECTION_STREAM, barriers).startswith("Total Industrial Production")
+
+
+def test_a_barrier_that_covers_the_boundary_still_stops_it():
+    """★Преграда бывает НАЧАТА ЛЕВЕЕ границы и накрывает её собой.
+
+    Последнее число окна стоит внутри самого названия раздела — «(Index,
+    2017=100)», — и граница садится на закрывающую скобку. Поиск преграды по
+    её началу такую не находит: она начинается раньше границы. Замер: пятнадцать
+    строк из 938 остались испорченными именно так, и среди них предельный случай
+    корпуса — «) Emissions (million metric tons) Total Energy (d)» из Table 9a.
+    """
+    label = _first_row(_SECTION_STREAM, [(0, "Industrial Production Indices (Index, 2017=100)")])
+    assert not label.startswith(")"), label
+
+
+def test_without_barriers_a_two_line_label_still_joins():
+    """★Отрицательный контроль: переход через строку сам по себе ЗАКОНЕН.
+
+    Имя показателя и его единицы стоят на разных строках — «Dry Natural Gas
+    Production» и «(billion cubic feet per day) …», — и таких переходов 131 из
+    201. Запрет переходить строку вообще был бы починкой, ломающей больше, чем
+    чинит; преграда ставится по знанию о разделах, а не по виду текста.
+    """
+    stream = (
+        "Dry Natural Gas Production\n(billion cubic feet per day) ..... 116.5 117.2 118.0 119.1\n"
+    )
+    assert _first_row(stream).startswith("Dry Natural Gas Production")
+
+
 def test_row_fragments_are_verbatim_substrings():
     """★Дословность — условие проверяемости ссылки, а не аккуратность.
 
