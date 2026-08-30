@@ -301,12 +301,26 @@ def _nearest_caption(captions: list[tuple[int, str]], position: int) -> int:
     return bisect_right([start for start, _ in captions], position) - 1
 
 
-def table_context_before(captions: list[tuple[int, str]], headers: list[str], position: int) -> str:
-    """Заголовок таблицы и шапка её колонок для места ``position``.
+def table_context_before(
+    captions: list[tuple[int, str]],
+    headers: list[str],
+    position: int,
+    blocks: list[tuple[int, str]] | None = None,
+) -> str:
+    """Заголовок таблицы, её раздел и шапка колонок для места ``position``.
 
     Обе части подчиняются одному правилу удалённости: чужая шапка так же врёт,
     как чужой заголовок, только незаметнее — числа привяжутся к периодам другой
     таблицы, и ошибка будет выглядеть как обычный ответ.
+
+    ★РАЗДЕЛ ПРИСТАВЛЯЕТСЯ К ЗАГОЛОВКУ, А НЕ ОТДЕЛЬНОЙ СТРОКОЙ. Контекст читается
+    потребителями как «заголовок, перевод строки, шапка» (см. ``row_context``),
+    и третья строка сломала бы этот разбор. «Table 9a … — Carbon Dioxide (CO2)
+    Emissions» и по смыслу вернее: это уточнённое название того же места.
+
+    ★Раздел берётся только ВНУТРИ своей таблицы — не раньше её заголовка.
+    Без этого условия раздел предыдущей таблицы протёк бы в следующую, и
+    протёк бы незаметно: он выглядит как настоящий и на вид проверяем.
     """
     index = _nearest_caption(captions, position)
     if index < 0:
@@ -314,6 +328,10 @@ def table_context_before(captions: list[tuple[int, str]], headers: list[str], po
     start, caption = captions[index]
     if position - start > MAX_CAPTION_DISTANCE:
         return ""
+    if blocks:
+        place = _nearest_caption(blocks, position)
+        if place >= 0 and blocks[place][0] >= start:
+            caption = f"{caption} — {blocks[place][1]}"
     header = headers[index] if index < len(headers) else ""
     return f"{caption}\n{header}" if header else caption
 
@@ -445,6 +463,18 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
 
     parts: list[str] = []
     page_of_char: list[int] = []
+    # Разделы таблиц в координатах ПОТОКА: страницы приходят со смещениями
+    # внутри себя, а сшиваются подряд, поэтому к каждому прибавляется длина уже
+    # уложенного. Пересчёт здесь, а не у поставщика: смещение потока — свойство
+    # сборки, и знать о нём разбору страницы незачем.
+    block_positions: list[tuple[int, str]] = []
+    offset = 0
+    for page in pages:
+        for block in page.get("blocks") or ():
+            block_positions.append((offset + block["at"], block["title"]))
+        offset += len(page["text"])
+    block_positions.sort()
+
     for page in pages:
         text = page["text"]
         parts.append(text)
@@ -505,7 +535,9 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
                 end=end,
                 page_start=page_of_char[start],
                 page_end=page_of_char[end - 1],
-                context=context_outside(body, table_context_before(captions, headers, start)),
+                context=context_outside(
+                    body, table_context_before(captions, headers, start, block_positions)
+                ),
             ).as_dict()
         )
         if end == total:
@@ -529,7 +561,7 @@ def chunk_pages(pages: list[dict], size: int, overlap: int) -> list[dict]:
                 page_end=page_of_char[row_end - 1],
                 context=row_context(
                     stream[row_start:row_end],
-                    table_context_before(captions, headers, row_start),
+                    table_context_before(captions, headers, row_start, block_positions),
                 ),
                 kind="row",
             ).as_dict()

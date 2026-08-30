@@ -235,6 +235,103 @@ def test_row_carries_its_table_caption():
     assert "World Crude Oil Production" in rows[0]["context"]
 
 
+# ── раздел таблицы в контексте строки ──────────────────────────────────────
+# ★Одна таблица бывает про разное. «Table 9a. U.S. Macroeconomic Indicators and
+# CO2 Emissions» несёт пять разделов, и строка «Chemicals» относится к
+# промышленному производству, а не к выбросам. Заголовок, подставленный всем
+# строкам, раздаёт им все темы разом: замерено на корпусе STEO — слово CO2
+# досталось всем 312 строкам таблицы, из которых к выбросам относятся четыре.
+
+_BLOCK_STREAM = (
+    "Table 9a. U.S. Macroeconomic Indicators and CO2 Emissions\n"
+    "Industrial Production Indices (Index, 2017=100)\n"
+    "Chemicals ............ 102.2 102.3 107.1 104.8 105.9\n"
+    "Carbon Dioxide (CO2) Emissions (million metric tons)\n"
+    "Petroleum ............ 2,203 2,187 2,201 2,178 2,190\n"
+)
+
+
+def _block_page(stream: str = _BLOCK_STREAM) -> dict:
+    titles = (
+        "Industrial Production Indices (Index, 2017=100)",
+        "Carbon Dioxide (CO2) Emissions (million metric tons)",
+    )
+    return {
+        "page": 52,
+        "text": stream,
+        "blocks": [{"title": title, "at": stream.find(title)} for title in titles],
+    }
+
+
+def _row_context(chunks: list[dict], label: str) -> str:
+    """Контекст строки, найденной ПО ВХОЖДЕНИЮ подписи, а не по началу текста.
+
+    ★Фрагмент строки начинается не с подписи, когда предыдущая строка кончается
+    цифрой или скобкой: у «Chemicals» под разделом «(Index, 2017=100)» граница
+    подписи отсчитывается от последнего числа и захватывает закрывающую скобку
+    предыдущей строки. Это отдельный дефект границы, он виден и на корпусе
+    («) Total Industrial Production»), и к разделам отношения не имеет —
+    поэтому проверка разделов не должна на него опираться.
+    """
+    rows = [c for c in chunks if c["kind"] == "row" and label in c["text"]]
+    assert rows, [c["text"][:30] for c in chunks]
+    return rows[0]["context"]
+
+
+def test_row_takes_the_section_it_stands_in_not_just_the_caption():
+    chunks = chunk_pages([_block_page()], size=200, overlap=40)
+    assert "Industrial Production" in _row_context(chunks, "Chemicals")
+    assert "Carbon Dioxide" in _row_context(chunks, "Petroleum")
+
+
+def test_the_section_of_a_neighbour_row_does_not_leak():
+    """★Отрицательный контроль, без которого проверка выше ничего не значит.
+
+    Разбор, приставляющий к строке ЛЮБОЙ раздел страницы, прошёл бы предыдущую
+    проверку наполовину и выглядел бы работающим на счётчике «у скольких строк
+    есть раздел». Различает только то, что чужой раздел ОТСУТСТВУЕТ.
+    """
+    chunks = chunk_pages([_block_page()], size=200, overlap=40)
+    assert "Carbon Dioxide" not in _row_context(chunks, "Chemicals")
+    assert "Industrial Production" not in _row_context(chunks, "Petroleum")
+
+
+def test_a_section_standing_before_the_caption_is_not_borrowed():
+    """Раздел предыдущей таблицы не протекает в следующую.
+
+    Протёк бы незаметно: он выглядит как настоящий раздел и на вид проверяем —
+    строка получила бы тему таблицы, которой на этом месте уже нет.
+
+    ★У ВТОРОЙ ТАБЛИЦЫ РАЗДЕЛОВ НЕТ ВОВСЕ, и это условие проверки, а не деталь
+    оформления. Первая версия этого теста ставила чужой раздел перед таблицей, у
+    которой были свои: ближайшим сверху всё равно оказывался свой, охранное
+    условие не участвовало, и проверка проходила бы и без него — то есть не
+    проверяла ничего.
+
+    ★ВЫЗОВ ПРЯМОЙ, А НЕ ЧЕРЕЗ ``chunk_pages``. Граница подписи строки отступает
+    назад до последнего числа и на коротком потоке уезжает в самый заголовок
+    («Table 8.»), так что позиция строки оказывается ВЫШЕ раздела и раздел не
+    применяется по совсем другой причине. Проверка условия должна зависеть от
+    условия, а не от чужого дефекта.
+    """
+    from neftegaz.rag.chunking import table_context_before
+
+    captions = [(0, "Table 8. Refinery Utilization"), (100, "Table 9a. Macro and CO2")]
+    blocks = [(40, "Gross Inputs")]
+    # Положительная половина: своя таблица — раздел приезжает.
+    assert "Gross Inputs" in table_context_before(captions, ["", ""], 60, blocks)
+    # Отрицательная: строка следующей таблицы — тот же раздел ближайший сверху,
+    # и отвергает его именно условие «не раньше своего заголовка».
+    assert "Gross Inputs" not in table_context_before(captions, ["", ""], 140, blocks)
+
+
+def test_a_table_without_sections_leaves_the_caption_alone():
+    """★Пустой раздел — законный исход. Без этой проверки не отличить разбор,
+    приставляющий раздел всегда, от разбора, приставляющего его по делу."""
+    chunks = chunk_pages([{"page": 7, "text": _ROW_STREAM}], size=200, overlap=40)
+    assert " — " not in _row_context(chunks, "United States")
+
+
 def test_quarter_columns_are_tied_to_their_year():
     """★Шапка обязана говорить, КАКОГО ГОДА квартал.
 
