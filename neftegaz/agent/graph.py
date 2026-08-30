@@ -103,6 +103,14 @@ class AgentState(TypedDict, total=False):
     # узел, который его не вернул, оставляет прежнее значение, а чекпоинтер
     # переносит его в следующий вопрос.
     last_horizon_days: int
+    # Человек в ответ на уточнение попросил считать без сценария. Флаг живёт один
+    # ход и гасится в начале следующего: иначе базовый режим стал бы липким.
+    scenario_waived: bool
+    # Вопрос, на который агент ответил УТОЧНЯЮЩИМ ВОПРОСОМ вместо расчёта.
+    # Живёт до следующего хода: ответ пользователя сам по себе неполон
+    # («на 2 млн барр./сут» — про что?), и смысл ему даёт только тот вопрос,
+    # который его вызвал. Пустая строка значит «ничего не висит».
+    pending_question: str
     # Ходы разговора. Аннотация задаёт reducer: LangGraph не заменяет поле
     # новым значением, а прогоняет старое и новое через merge_history.
     history: Annotated[list[dict], merge_history]
@@ -345,9 +353,71 @@ def _format_web_context(hits: list[Any]) -> str:
 # ── nodes ──────────────────────────────────────────────────────────────────
 
 
+# Отказ от сценария в ответ на уточнение: человек говорит «считай без него».
+# ★Выход из уточнения обязателен. Ветка, из которой нельзя выйти иначе как начав
+# разговор заново, — не диалог, а ловушка.
+_WAIVER = re.compile(r"без\s+сценар|без\s+услов|без\s+допущ|базов\w*\s+прогноз|не\s+важно|неважно")
+
+
+def resolve_pending(pending: str, reply: str) -> str | None:
+    """Склеить висящий вопрос с ответом на уточнение — или отказаться от склейки.
+
+    ★Склейка обязана быть ПРОВЕРЯЕМОЙ, а не доверчивой. Спросив «на сколько
+    сократит?», агент не вправе считать ответом всё, что придёт следующим: человек
+    имеет полное право сменить тему, и приклеенный к новой теме старый вопрос
+    испортил бы ответ ровно так же, как молчаливый ноль до этого.
+
+    Критерий один и он механический: склейка принимается, если ВМЕСТЕ вопрос и
+    ответ дают читаемый сценарий, а ответ САМ ПО СЕБЕ его не даёт. Первое условие
+    говорит «уточнение сработало», второе — «это именно уточнение, а не новый
+    самостоятельный вопрос». Не выполнено любое — возвращается ``None``, висящий
+    вопрос забывается, а реплика обрабатывается как обычная.
+    """
+    merged = f"{pending.rstrip(' ?!.')} {reply.lstrip()}"
+    together = read_supply_scenario(merged)
+    # ★Обе половины условия несущие, и `understood` в одиночку НЕ ГОДИТСЯ: оно
+    # истинно и тогда, когда сценария нет вовсе. Реплика «какая сейчас цена
+    # Brent», приклеенная к висящему вопросу, даёт текст без всякого сценария —
+    # то есть «понятый» в смысле «читать нечего», и склейка прошла бы.
+    if not (together.stated and together.understood):
+        return None
+    alone = read_supply_scenario(reply)
+    if alone.stated and alone.understood:
+        return None
+    return merged
+
+
 def node_route(state: AgentState) -> AgentState:
     """Classify the question into one of the graph's three branches."""
     question = state["question"]
+
+    # ★Ответ на уточняющий вопрос — не новый вопрос, а вторая половина прежнего.
+    # Склейка стои́т ДО классификации намеренно: «на 2 млн барр./сут» само по себе
+    # не относится ни к какой отрасли и ушло бы в отказ, а вместе с висящим
+    # вопросом это обычный сценарный расчёт.
+    #
+    # ★Висящий вопрос гасится В ЛЮБОМ случае: склеился он или нет. Уточнение
+    # задаётся один раз; переживи оно неудачную склейку — второй не относящийся
+    # к делу ход снова приклеился бы к тому же вопросу.
+    #
+    # ★Оба поля пишутся КАЖДЫЙ ход, а не только когда меняются: они живут в
+    # чекпоинтере и без явного сброса протекли бы в следующие вопросы разговора.
+    resolved: AgentState = {"pending_question": "", "scenario_waived": False}
+    pending = state.get("pending_question") or ""
+    if pending:
+        if _WAIVER.search(question.lower()):
+            # ★Из уточнения обязан быть выход. Не предложи мы его — вопрос с
+            # непрочитанным сценарием стал бы тупиком: агент спрашивает, человек
+            # не может ответить в требуемой форме, и разговор упирается в стену.
+            question = pending
+            resolved["question"] = question
+            resolved["scenario_waived"] = True
+            return {**resolved, "route": "forecast"}
+        merged = resolve_pending(pending, question)
+        if merged is not None:
+            question = merged
+            resolved["question"] = question
+            state = {**state, "question": question}
 
     # A forecast request is recognised structurally before asking the model:
     # these phrasings are unambiguous, and skipping a round trip on them makes
@@ -357,7 +427,13 @@ def node_route(state: AgentState) -> AgentState:
         word in lowered
         for word in ("спрогнозируй", "прогноз цен", "оцени диапазон", "спрогнозировать")
     ):
-        return {"route": "forecast"}
+        return {**resolved, "route": "forecast"}
+
+    # Склейка удалась ⇒ это сценарный вопрос по построению: она принимается
+    # только тогда, когда вместе получился ЧИТАЕМЫЙ сценарий. Спрашивать об
+    # этом классификатор незачем, а лишний заход к модели стоит секунд.
+    if "question" in resolved:
+        return {**resolved, "route": "forecast"}
 
     try:
         # История нужна классификатору не меньше, чем отвечающему: «а на пять
@@ -371,9 +447,9 @@ def node_route(state: AgentState) -> AgentState:
         # Default to the industry branch: answering a cooking question with oil
         # analysis is embarrassing, but refusing a legitimate industry question
         # because the classifier timed out is a broken product.
-        return {"route": "industry"}
+        return {**resolved, "route": "industry"}
 
-    return {"route": parse_route(verdict)}
+    return {**resolved, "route": parse_route(verdict)}
 
 
 ROUTE_NAMES = ("forecast", "industry", "other")
@@ -456,11 +532,20 @@ def node_forecast(state: AgentState) -> AgentState:
             # его как ОТВЕТ НА СВОЙ ВОПРОС — а это базовый расчёт, к сценарию
             # отношения не имеющий. Прежний разбор возвращал в таких случаях
             # ноль, и ошибка была совершенно беззвучной.
+            #
+            # ★Оговорка остаётся и когда человек САМ попросил считать без
+            # сценария: тогда она не упрёк, а напоминание, каким именно числом
+            # он в итоге распоряжается. Меняется формулировка, не факт.
             text += (
-                f"\n\n★Сценарий в вопросе назван, но не прочитан: {scenario.note}. "
-                f"Числа выше — БАЗОВЫЙ прогноз, изменение предложения в них не "
-                f"учтено. Назови величину одним значением и единицей — например "
-                f"«сокращение на 2 млн барр./сут» или «сокращение на 2%»."
+                "\n\n★Расчёт выполнен БЕЗ сценария по твоей просьбе. Числа выше — "
+                "базовый прогноз, изменение предложения в них не учтено."
+                if state.get("scenario_waived")
+                else (
+                    f"\n\n★Сценарий в вопросе назван, но не прочитан: {scenario.note}. "
+                    f"Числа выше — БАЗОВЫЙ прогноз, изменение предложения в них не "
+                    f"учтено. Назови величину одним значением и единицей — например "
+                    f"«сокращение на 2 млн барр./сут» или «сокращение на 2%»."
+                )
             )
         if requested is not None and requested > horizon:
             # ★Урезание запроса объявляется вслух. Спросив пять лет и получив
@@ -512,6 +597,37 @@ def node_answer(state: AgentState) -> AgentState:
     return {"answer": answer, "history": [{"question": question, "answer": answer}]}
 
 
+def node_clarify(state: AgentState) -> AgentState:
+    """Спросить недостающее вместо того, чтобы посчитать не то.
+
+    ★Единственный повод для уточняющего вопроса — состояние «сценарий назван, но
+    не прочитан». Не «вопрос кажется расплывчатым» и не «модель не уверена»:
+    агент, переспрашивающий по ощущению, хуже угадывающего, потому что тратит
+    ход человека и ничего за это не даёт. Здесь же недостающее НАЗВАНО точно
+    (вилка · нет направления · неопознанная единица), и форма ответа известна.
+
+    Вопрос уходит в историю обычным ходом и запоминается в ``pending_question``:
+    ответ «на 2 млн барр./сут» сам по себе бессмыслен, смысл ему даёт заданный
+    вопрос. Склейкой занимается :func:`resolve_pending`.
+    """
+    question = state["question"]
+    scenario = read_supply_scenario(question)
+    reply = (
+        f"Уточни, пожалуйста, сценарий: {scenario.note}.\n\n"
+        f"Назови одно значение с единицей — например «на 2 млн барр./сут», "
+        f"«на 500 тыс. барр./сут» или «на 2%». Скажи «без сценария», если нужен "
+        f"базовый прогноз без допущений об изменении добычи."
+    )
+    return {
+        "answer": reply,
+        "route": "clarify",
+        "used_reports": False,
+        "used_web": False,
+        "pending_question": question,
+        "history": [{"question": question, "answer": reply}],
+    }
+
+
 def node_out_of_scope(state: AgentState) -> AgentState:
     # Отказ — тоже ход разговора: без него следующее «а почему?» повисает в
     # воздухе, потому что модель не видит, на что отвечала.
@@ -526,9 +642,14 @@ def node_out_of_scope(state: AgentState) -> AgentState:
 # ── edges ──────────────────────────────────────────────────────────────────
 
 
-def _after_route(state: AgentState) -> Literal["forecast", "retrieve", "out_of_scope"]:
+def _after_route(state: AgentState) -> Literal["forecast", "retrieve", "out_of_scope", "clarify"]:
     route = state.get("route", "industry")
     if route == "forecast":
+        # ★Уточнение перехватывает ТОЛЬКО расчётную ветку и только на измеренном
+        # условии. Отраслевой вопрос без сценария — законный вопрос, и спрашивать
+        # там нечего: сценарий на него не влияет.
+        if read_supply_scenario(state["question"]).unreadable and not state.get("scenario_waived"):
+            return "clarify"
         return "forecast"
     if route == "other":
         return "out_of_scope"
@@ -635,12 +756,18 @@ def build_graph(checkpointer=None):
     graph.add_node("forecast", node_forecast)
     graph.add_node("answer", node_answer)
     graph.add_node("out_of_scope", node_out_of_scope)
+    graph.add_node("clarify", node_clarify)
 
     graph.add_edge(START, "route")
     graph.add_conditional_edges(
         "route",
         _after_route,
-        {"forecast": "forecast", "retrieve": "retrieve", "out_of_scope": "out_of_scope"},
+        {
+            "forecast": "forecast",
+            "retrieve": "retrieve",
+            "out_of_scope": "out_of_scope",
+            "clarify": "clarify",
+        },
     )
     graph.add_conditional_edges("retrieve", _after_retrieve, {"web": "web", "answer": "answer"})
     graph.add_edge("web", "answer")
@@ -654,6 +781,7 @@ def build_graph(checkpointer=None):
     graph.add_edge("forecast", "retrieve")
     graph.add_edge("answer", END)
     graph.add_edge("out_of_scope", END)
+    graph.add_edge("clarify", END)
     return graph.compile(checkpointer=checkpointer)
 
 

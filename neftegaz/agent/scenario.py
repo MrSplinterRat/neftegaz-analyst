@@ -132,6 +132,14 @@ _NEGATION = re.compile(r"\bне\s*$")
 # из текста не следует, а разбор обязан не выбирать за человека.
 _RANGE = re.compile(rf"\bс\s*{_NUM}\s*(?:до|по)\s+{_NUM}")
 
+# О чём идёт речь. Указатель направления сам по себе ничего не значит: «упадёт»
+# в вопросе про ЦЕНУ — не сценарий предложения, и принимать его за сценарий
+# значило бы спрашивать человека там, где спрашивать не о чем.
+_SUPPLY = re.compile(
+    r"добыч|предложен|производств|поставк|квот|опек|opec|supply|production|output|"
+    r"баррел|барр\b|б\s*/\s*с|mb\s*/?\s*d"
+)
+
 
 @dataclass(frozen=True)
 class SupplyScenario:
@@ -191,18 +199,30 @@ def read_supply_scenario(question: str) -> SupplyScenario:
     ]
 
     if not matches:
+        # ★Указателя направления МАЛО, чтобы объявить сценарий: «упадёт» есть и в
+        # вопросе «спрогнозируй Brent, цена упадёт?», где речь о ЦЕНЕ, а не о
+        # предложении. Без этой оговорки уточняющий вопрос задавался бы там, где
+        # спрашивать не о чем, — а переспрашивающий впустую агент хуже молчащего.
+        has_cue = _CUT_RE.search(text) is not None or _RAISE_RE.search(text) is not None
+        if not (has_cue and _SUPPLY.search(text)):
+            return SupplyScenario(0.0, stated=False, understood=True)
         # Число названо рядом с указателем направления, но единица не опознана:
         # «сократит добычу на 2» — величина есть, а чего именно два, неизвестно.
-        has_digit = re.search(r"\d", text) is not None
-        has_cue = _CUT_RE.search(text) is not None or _RAISE_RE.search(text) is not None
-        if has_digit and has_cue:
+        if re.search(r"\d", text):
             return SupplyScenario(
                 0.0,
                 stated=True,
                 understood=False,
                 note="величина названа, но единица измерения не опознана",
             )
-        return SupplyScenario(0.0, stated=False, understood=True)
+        # ★Сценарий без величины вовсе — «а если ОПЕК+ сократит добычу?». Раньше
+        # это молча давало базовый прогноз, то есть ответ на другой вопрос.
+        return SupplyScenario(
+            0.0,
+            stated=True,
+            understood=False,
+            note="сказано про изменение добычи, но не названа величина",
+        )
 
     if _RANGE.search(text):
         return SupplyScenario(
