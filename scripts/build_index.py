@@ -9,7 +9,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, ".")
@@ -30,8 +32,41 @@ def main() -> int:
     print(f"Хранилище: {settings.qdrant_url or settings.qdrant_path}")
     print()
 
+    pdfs = sorted(name for name in os.listdir(args.dir) if name.lower().endswith(".pdf")) \
+        if os.path.isdir(args.dir) else []
+    if pdfs:
+        print(f"PDF-файлов: {len(pdfs)}")
+        print(
+            "★Это долго: почти всё время уходит на кодировщик эмбеддингов, а не на разбор.\n"
+            "  Замер на этой машине (один отчёт EIA STEO, 1177 фрагментов, 155.6 с):\n"
+            "  разбор PDF ~0.5 с, нарезка ~0.02 с, эмбеддинг ~7.6 фрагмента/с —\n"
+            "  то есть ~2.6 минуты на отчёт и ~21 минута на все восемь.\n"
+            "  Ниже раз в 30 секунд печатается отметка «жив»: молчание в этом месте\n"
+            "  неотличимо от зависания, а зависания здесь нет."
+        )
+        print(f"  Ожидаемое время: ~{len(pdfs) * 2.6:.0f} мин.")
+        print(flush=True)
+
     started = time.monotonic()
-    results = ingest_directory(args.dir, recreate=args.recreate)
+    alive = threading.Event()
+
+    def heartbeat() -> None:
+        """Отметка «процесс жив» раз в 30 секунд.
+
+        ★Только ВРЕМЯ, и это осознанно. Показывать долю сделанного было бы
+        полезнее, но единственный способ узнать её — спрашивать хранилище во
+        время записи, то есть вмешиваться в то, за чем наблюдаешь. Прибор,
+        способный испортить наблюдаемое, здесь не стои́т своей точности.
+        """
+        while not alive.wait(30):
+            print(f"  … идёт индексация, {(time.monotonic() - started) / 60:.1f} мин", flush=True)
+
+    ticker = threading.Thread(target=heartbeat, daemon=True)
+    ticker.start()
+    try:
+        results = ingest_directory(args.dir, recreate=args.recreate)
+    finally:
+        alive.set()
     elapsed = time.monotonic() - started
 
     if not results:
