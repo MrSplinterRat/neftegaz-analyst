@@ -53,7 +53,9 @@ class Settings:
     # Any OpenAI-compatible endpoint. The default points at a local llama.cpp
     # server so the project runs with no account and no key; set
     # OPENAI_BASE_URL / OPENAI_API_KEY to use a hosted model instead.
-    llm_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "http://127.0.0.1:8081/v1"))
+    llm_base_url: str = field(
+        default_factory=lambda: _env("OPENAI_BASE_URL", "http://127.0.0.1:8081/v1")
+    )
     llm_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", "not-needed-for-local"))
     llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "local"))
     # ★Отрицательное значение означает «не передавать параметр серверу вовсе».
@@ -80,7 +82,9 @@ class Settings:
     # ── Vector store ───────────────────────────────────────────────────────
     # Embedded Qdrant writing to a local directory: no separate service to run,
     # which is what lets `docker run` be a single command.
-    qdrant_path: str = field(default_factory=lambda: _env("QDRANT_PATH", str(ROOT / "data" / "qdrant")))
+    qdrant_path: str = field(
+        default_factory=lambda: _env("QDRANT_PATH", str(ROOT / "data" / "qdrant"))
+    )
     qdrant_url: str = field(default_factory=lambda: _env("QDRANT_URL", ""))
     collection: str = field(default_factory=lambda: _env("QDRANT_COLLECTION", "reports"))
 
@@ -135,7 +139,9 @@ class Settings:
     #
     # −0.31 это ИЗМЕРЕННОЕ квартальное значение (регрессия отклика цены на сдвиг
     # добычи, 9 разностей, 95% ДИ −0.71…−0.20).
-    demand_elasticity_short: float = field(default_factory=lambda: _env_float("DEMAND_ELASTICITY_SHORT", -0.31))
+    demand_elasticity_short: float = field(
+        default_factory=lambda: _env_float("DEMAND_ELASTICITY_SHORT", -0.31)
+    )
     # ⚠Длинный конец НЕ измерен: корпус накрывает полтора года, длинного
     # горизонта в нём нет. Взято литературное −0.30 для эластичности СПРОСА, и
     # вот почему это осмысленно именно для длинного горизонта: за годы буфер
@@ -144,11 +150,17 @@ class Settings:
     # ★Численно короткий и длинный конец почти совпали — значит на этих данных
     # мы горизонты НЕ РАЗЛИЧАЕМ, и интерполяция между ними почти плоская. Это
     # честное отражение незнания, а не свойство рынка.
-    demand_elasticity_long: float = field(default_factory=lambda: _env_float("DEMAND_ELASTICITY_LONG", -0.30))
+    demand_elasticity_long: float = field(
+        default_factory=lambda: _env_float("DEMAND_ELASTICITY_LONG", -0.30)
+    )
     # Горизонты, между которыми эластичность интерполируется линейно; за
     # пределами — насыщение. 90 дней это квартал, 1825 — пять лет.
-    elasticity_short_days: int = field(default_factory=lambda: _env_int("ELASTICITY_SHORT_DAYS", 90))
-    elasticity_long_days: int = field(default_factory=lambda: _env_int("ELASTICITY_LONG_DAYS", 1825))
+    elasticity_short_days: int = field(
+        default_factory=lambda: _env_int("ELASTICITY_SHORT_DAYS", 90)
+    )
+    elasticity_long_days: int = field(
+        default_factory=lambda: _env_int("ELASTICITY_LONG_DAYS", 1825)
+    )
     # Полоса неопределённости самой эластичности: коридор прогноза расширяется
     # ровно на это незнание — сценарий добавляет гипотезу, а гипотеза не может
     # сузить доверительный интервал.
@@ -156,11 +168,15 @@ class Settings:
     # оценки (край со стороны более сильного отклика), и это значение не
     # используется. Оно остаётся умолчанием для литературного режима: −0.20 это
     # ближний край измеренного интервала.
-    demand_elasticity_band: float = field(default_factory=lambda: _env_float("DEMAND_ELASTICITY_BAND", -0.20))
+    demand_elasticity_band: float = field(
+        default_factory=lambda: _env_float("DEMAND_ELASTICITY_BAND", -0.20)
+    )
     # Мировое предложение жидких углеводородов, млн барр./сут. Значение по
     # умолчанию — порядок, а не факт дня; при подключённом ряду поставщика
     # его следует брать из данных.
-    global_supply_mb_d: float = field(default_factory=lambda: _env_float("GLOBAL_SUPPLY_MB_D", 102.0))
+    global_supply_mb_d: float = field(
+        default_factory=lambda: _env_float("GLOBAL_SUPPLY_MB_D", 102.0)
+    )
 
     # ── Память диалога ─────────────────────────────────────────────────────
     # Где хранятся ходы разговора между вопросами:
@@ -181,7 +197,9 @@ class Settings:
     # быть виден в конфигурации, а не выведен из размера окна модели.
     # Старые ходы отбрасываются целиком, без пересказа: пересказ означал бы
     # ещё один вызов модели и недетерминизм там, где его быть не должно.
-    history_budget_chars: int = field(default_factory=lambda: _env_int("HISTORY_BUDGET_CHARS", 4000))
+    history_budget_chars: int = field(
+        default_factory=lambda: _env_int("HISTORY_BUDGET_CHARS", 4000)
+    )
     # Потолок на ОДИН ход. Без него единственный длинный ответ съедает весь
     # бюджет и вытесняет всю остальную историю.
     history_turn_cap_chars: int = field(
@@ -189,8 +207,12 @@ class Settings:
     )
 
     # ── Data locations ─────────────────────────────────────────────────────
-    reports_dir: str = field(default_factory=lambda: _env("REPORTS_DIR", str(ROOT / "data" / "reports")))
-    prices_csv: str = field(default_factory=lambda: _env("PRICES_CSV", str(ROOT / "data" / "prices" / "brent.csv")))
+    reports_dir: str = field(
+        default_factory=lambda: _env("REPORTS_DIR", str(ROOT / "data" / "reports"))
+    )
+    prices_csv: str = field(
+        default_factory=lambda: _env("PRICES_CSV", str(ROOT / "data" / "prices" / "brent.csv"))
+    )
 
 
 settings = Settings()

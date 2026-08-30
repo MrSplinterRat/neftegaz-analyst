@@ -166,9 +166,7 @@ def read_report_factors(path: str) -> pd.DataFrame:
                 "production": _number(balance.rows[ROW_PRODUCTION].cells.get(index)),
                 "consumption": _number(balance.rows[ROW_CONSUMPTION].cells.get(index)),
                 "stock_change": _number(balance.rows[ROW_STOCK_CHANGE].cells.get(index)),
-                "oecd_inventories": _number(
-                    balance.rows[ROW_OECD_INVENTORIES].cells.get(index)
-                ),
+                "oecd_inventories": _number(balance.rows[ROW_OECD_INVENTORIES].cells.get(index)),
                 "brent": _number(brent.cells.get(index)) if brent is not None else None,
             }
         )

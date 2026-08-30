@@ -41,9 +41,16 @@ import subprocess
 from dataclasses import dataclass, field
 
 __all__ = [
-    "OK", "NOTICE", "WARN", "BROKEN", "UNKNOWN",
-    "SEVERITY_ORDER", "Finding", "IntakeReport",
-    "inspect_pdf", "inspect_directory",
+    "OK",
+    "NOTICE",
+    "WARN",
+    "BROKEN",
+    "UNKNOWN",
+    "SEVERITY_ORDER",
+    "Finding",
+    "IntakeReport",
+    "inspect_pdf",
+    "inspect_directory",
 ]
 
 OK = "ok"
@@ -117,8 +124,8 @@ class IntakeReport:
         head = f"{os.path.basename(self.path)}: {self.severity}"
         if not self.findings:
             return head
-        return head + "\n" + "\n".join(
-            f"  [{f.severity}] {f.code}: {f.detail}" for f in self.findings
+        return (
+            head + "\n" + "\n".join(f"  [{f.severity}] {f.code}: {f.detail}" for f in self.findings)
         )
 
 
@@ -163,7 +170,8 @@ def _check_container(report: IntakeReport, data: bytes) -> None:
     report.facts["revisions"] = revisions
     if revisions > 1:
         report.add(
-            "incremental_updates", NOTICE,
+            "incremental_updates",
+            NOTICE,
             f"инкрементальных ревизий: {revisions} — актуальные объекты в последней",
         )
 
@@ -172,7 +180,7 @@ def _check_container(report: IntakeReport, data: bytes) -> None:
         report.add("no_startxref", BROKEN, "нет startxref — таблицу ссылок надо искать сканом")
     else:
         # Проверяется только ПОСЛЕДНИЙ startxref: он и есть точка входа.
-        offset = re.search(rb"startxref\s+(\d+)", data[positions[-1]:])
+        offset = re.search(rb"startxref\s+(\d+)", data[positions[-1] :])
         if offset is None:
             report.add("bad_startxref", BROKEN, "после startxref нет числа")
         else:
@@ -180,15 +188,18 @@ def _check_container(report: IntakeReport, data: bytes) -> None:
             report.facts["startxref"] = value
             if value <= 0 or value >= len(data):
                 report.add(
-                    "startxref_out_of_range", BROKEN,
+                    "startxref_out_of_range",
+                    BROKEN,
                     f"startxref указывает на {value} при длине файла {len(data)}",
                 )
-            elif not data[value:value + 32].lstrip().startswith((b"xref", b"%", b"<<")) \
-                    and not re.match(rb"\s*\d+\s+\d+\s+obj", data[value:value + 32]):
+            elif not data[value : value + 32].lstrip().startswith(
+                (b"xref", b"%", b"<<")
+            ) and not re.match(rb"\s*\d+\s+\d+\s+obj", data[value : value + 32]):
                 # Смещение внутри файла, но ведёт не туда: типичный след
                 # переупаковки файла инструментом, не пересчитавшим таблицу.
                 report.add(
-                    "startxref_misaligned", WARN,
+                    "startxref_misaligned",
+                    WARN,
                     f"по смещению {value} нет ни xref, ни объекта",
                 )
 
@@ -256,7 +267,8 @@ def _check_fonts(report: IntakeReport) -> None:
         # Семейство Font-Decoding Split: текст извлекается, выглядит текстом, но
         # символы не те. Ни одна проверка целости этого не видит.
         report.add(
-            "fonts_without_tounicode", NOTICE,
+            "fonts_without_tounicode",
+            NOTICE,
             f"{len(without_unicode)} из {len(lines)} шрифтов без ToUnicode "
             f"({', '.join(without_unicode[:3])}…) — риск неверного декодирования",
         )
@@ -281,7 +293,8 @@ def _check_text_layer(report: IntakeReport, pages_expected: int | None) -> None:
         report.add("no_text_layer", WARN, "ни на одной странице нет текста — вероятно, скан")
     elif empty:
         report.add(
-            "pages_without_text", NOTICE,
+            "pages_without_text",
+            NOTICE,
             f"страниц без текста: {len(empty)} из {len(pages)} "
             f"(№ {', '.join(str(n) for n in empty[:5])}{'…' if len(empty) > 5 else ''})",
         )
@@ -290,7 +303,8 @@ def _check_text_layer(report: IntakeReport, pages_expected: int | None) -> None:
         # ★ДВА ПУТИ РАСХОДЯТСЯ — ЗНАЧИТ, ХОТЯ БЫ ОДИН НЕВЕРЕН. Какой именно,
         # приёмка не решает: её дело — не пропустить расхождение дальше молча.
         report.add(
-            "page_count_mismatch", WARN,
+            "page_count_mismatch",
+            WARN,
             f"pdfinfo насчитал {pages_expected} страниц, извлекатель — {len(pages)}",
         )
 

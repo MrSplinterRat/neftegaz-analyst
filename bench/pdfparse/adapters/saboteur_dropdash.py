@@ -5,6 +5,7 @@
 это уезжает целиком. На строке из одних чисел такой дефект НЕВИДИМ — потому в
 эталоне и лежит строка с прочерками.
 """
+
 from __future__ import annotations
 
 from adapters._perfect import tables

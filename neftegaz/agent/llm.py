@@ -76,7 +76,9 @@ def ask(system: str, user: str) -> str:
     content = reply.content
     # Some servers return content as a list of parts rather than a string.
     if isinstance(content, list):
-        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+        )
     return strip_reasoning(str(content))
 
 

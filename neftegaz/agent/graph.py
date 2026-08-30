@@ -113,8 +113,18 @@ class AgentState(TypedDict, total=False):
 # are quarterly or monthly; anything asking about right now cannot be answered
 # from them however good the retrieval score is.
 FRESHNESS_MARKERS = (
-    "сейчас", "сегодня", "вчера", "текущ", "актуальн", "последн", "свеж",
-    "новост", "на данный момент", "котировк", "заявил", "объявил",
+    "сейчас",
+    "сегодня",
+    "вчера",
+    "текущ",
+    "актуальн",
+    "последн",
+    "свеж",
+    "новост",
+    "на данный момент",
+    "котировк",
+    "заявил",
+    "объявил",
 )
 
 MONTHS_TO_DAYS = 30
@@ -131,17 +141,34 @@ def _needs_fresh_data(question: str) -> bool:
 # ★«Полтора» намеренно НЕТ: округлить его до года значило бы ответить на другой
 # вопрос, а не признать, что вопрос не разобран. Умолчание честнее подмены.
 NUMERALS = {
-    "один": 1, "одного": 1, "одну": 1,
-    "два": 2, "две": 2, "двух": 2, "пару": 2, "пары": 2,
-    "три": 3, "трёх": 3, "трех": 3,
-    "четыре": 4, "четырёх": 4, "четырех": 4,
-    "пять": 5, "пяти": 5,
-    "шесть": 6, "шести": 6,
-    "семь": 7, "семи": 7,
-    "восемь": 8, "восьми": 8,
-    "девять": 9, "девяти": 9,
-    "десять": 10, "десяти": 10,
-    "двенадцать": 12, "двенадцати": 12,
+    "один": 1,
+    "одного": 1,
+    "одну": 1,
+    "два": 2,
+    "две": 2,
+    "двух": 2,
+    "пару": 2,
+    "пары": 2,
+    "три": 3,
+    "трёх": 3,
+    "трех": 3,
+    "четыре": 4,
+    "четырёх": 4,
+    "четырех": 4,
+    "пять": 5,
+    "пяти": 5,
+    "шесть": 6,
+    "шести": 6,
+    "семь": 7,
+    "семи": 7,
+    "восемь": 8,
+    "восьми": 8,
+    "девять": 9,
+    "девяти": 9,
+    "десять": 10,
+    "десяти": 10,
+    "двенадцать": 12,
+    "двенадцати": 12,
 }
 
 
@@ -234,9 +261,24 @@ def parse_supply_change(question: str) -> float:
 # перепроверит, направление — примет на веру. Поэтому корни перечислены с запасом,
 # и берутся полные, различающие формы: «пад» вошло бы в слово «западный».
 CUT_WORDS = (
-    "сокращ", "сократ", "снижен", "сниз", "уменьш", "срез", "урез",
-    "упад", "паден", "выпаден", "потер", "выбыт", "останов", "сверн",
-    "cut", "reduc", "decline", "drop",
+    "сокращ",
+    "сократ",
+    "снижен",
+    "сниз",
+    "уменьш",
+    "срез",
+    "урез",
+    "упад",
+    "паден",
+    "выпаден",
+    "потер",
+    "выбыт",
+    "останов",
+    "сверн",
+    "cut",
+    "reduc",
+    "decline",
+    "drop",
 )
 
 
@@ -343,7 +385,10 @@ def node_route(state: AgentState) -> AgentState:
     # these phrasings are unambiguous, and skipping a round trip on them makes
     # the common case both faster and immune to a classifier wobble.
     lowered = question.lower()
-    if any(word in lowered for word in ("спрогнозируй", "прогноз цен", "оцени диапазон", "спрогнозировать")):
+    if any(
+        word in lowered
+        for word in ("спрогнозируй", "прогноз цен", "оцени диапазон", "спрогнозировать")
+    ):
         return {"route": "forecast"}
 
     try:
@@ -476,8 +521,8 @@ def node_answer(state: AgentState) -> AgentState:
         # the user can read beats an error page.
         fallback = forecast_text or report_context or web_context
         answer = (
-            f"Языковая модель недоступна ({exc}).\n\n"
-            f"Собранные данные:\n\n{fallback}" if fallback
+            f"Языковая модель недоступна ({exc}).\n\nСобранные данные:\n\n{fallback}"
+            if fallback
             else f"Языковая модель недоступна: {exc}"
         )
     # Ход дописывается в историю здесь, в единственном месте, где разговор
@@ -610,8 +655,11 @@ def build_graph(checkpointer=None):
     graph.add_node("out_of_scope", node_out_of_scope)
 
     graph.add_edge(START, "route")
-    graph.add_conditional_edges("route", _after_route,
-                                {"forecast": "forecast", "retrieve": "retrieve", "out_of_scope": "out_of_scope"})
+    graph.add_conditional_edges(
+        "route",
+        _after_route,
+        {"forecast": "forecast", "retrieve": "retrieve", "out_of_scope": "out_of_scope"},
+    )
     graph.add_conditional_edges("retrieve", _after_retrieve, {"web": "web", "answer": "answer"})
     graph.add_edge("web", "answer")
     # ★Расчёт ведёт в поиск по корпусу, а не прямо в ответ. Требование 2.4

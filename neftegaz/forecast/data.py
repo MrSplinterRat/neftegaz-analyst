@@ -48,9 +48,7 @@ def load_prices_from_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.drop_duplicates(subset="date", keep="last")
     frame = frame.set_index("date").sort_index()
 
-    full_calendar = pd.date_range(
-        frame.index.min(), frame.index.max(), freq="D", name="date"
-    )
+    full_calendar = pd.date_range(frame.index.min(), frame.index.max(), freq="D", name="date")
     frame = frame.reindex(full_calendar)
 
     # Forward fill carries the last traded price across weekends and holidays,

@@ -45,8 +45,7 @@ def format_claim(claim: dict) -> str:
     source_type = claim.get("source_type")
     if source_type not in REQUIRED_FIELDS:
         raise ValueError(
-            f"unknown source_type: {source_type!r}; "
-            f"expected one of {sorted(REQUIRED_FIELDS)}"
+            f"unknown source_type: {source_type!r}; expected one of {sorted(REQUIRED_FIELDS)}"
         )
     for field in REQUIRED_FIELDS[source_type]:
         if field not in claim:

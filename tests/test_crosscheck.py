@@ -204,8 +204,8 @@ def test_lost_counts_only_divergence():
 
     report = CrossCheckReport(path="x.pdf")
     report.pages = [
-        compare_pages("20242024", "2024 2024", 1),   # tokenize
-        compare_pages("82.4", "82.4 48", 2),         # diverge, one token
+        compare_pages("20242024", "2024 2024", 1),  # tokenize
+        compare_pages("82.4", "82.4 48", 2),  # diverge, one token
     ]
     counts = report.counts()
     assert counts[TOKENIZE] == 1
@@ -220,7 +220,7 @@ def test_directory_scan_survives_a_missing_directory():
 # ── корпус ─────────────────────────────────────────────────────────────────
 
 
-MAIN_PAIR = "pdf2xml|poppler"   # имена в ключе пары отсортированы, см. compare_pages_multi
+MAIN_PAIR = "pdf2xml|poppler"  # имена в ключе пары отсортированы, см. compare_pages_multi
 
 
 @pytest.mark.skipif(not os.path.isfile(ONE_REPORT), reason="корпус не выложен")

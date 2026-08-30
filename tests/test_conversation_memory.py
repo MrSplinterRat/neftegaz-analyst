@@ -135,9 +135,7 @@ def offline_graph(monkeypatch):
     monkeypatch.setattr(
         graph_module, "node_retrieve", lambda state: {"report_hits": [], "used_reports": False}
     )
-    monkeypatch.setattr(
-        graph_module, "node_web", lambda state: {"web_hits": [], "used_web": False}
-    )
+    monkeypatch.setattr(graph_module, "node_web", lambda state: {"web_hits": [], "used_web": False})
 
     def fake_answer(state):
         seen = [turn["question"] for turn in state.get("history") or []]
@@ -199,9 +197,7 @@ def test_sqlite_memory_survives_a_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(
         graph_module, "node_retrieve", lambda state: {"report_hits": [], "used_reports": False}
     )
-    monkeypatch.setattr(
-        graph_module, "node_web", lambda state: {"web_hits": [], "used_web": False}
-    )
+    monkeypatch.setattr(graph_module, "node_web", lambda state: {"web_hits": [], "used_web": False})
     monkeypatch.setattr(
         graph_module,
         "node_answer",
@@ -257,8 +253,8 @@ def test_an_increase_is_still_read_as_an_increase(question):
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("а на пять лет?", 730),          # потолок: дальше истории — арифметика
-        ("а на год?", 365),               # единица времени без числа значит одну
+        ("а на пять лет?", 730),  # потолок: дальше истории — арифметика
+        ("а на год?", 365),  # единица времени без числа значит одну
         ("на квартал", 90),
         ("на две недели", 14),
         ("спрогнозируй на 3 месяца", 90),  # цифры работали и раньше
@@ -311,7 +307,9 @@ def test_forecast_horizon_carries_over_but_the_scenario_does_not(monkeypatch):
 
     monkeypatch.setattr(forecast_tool, "run_forecast", fake_run_forecast)
 
-    graph_module.node_forecast({"question": "спрогнозируй Brent на 2 года при сокращении на 1.5 млн барр./сут"})
+    graph_module.node_forecast(
+        {"question": "спрогнозируй Brent на 2 года при сокращении на 1.5 млн барр./сут"}
+    )
     assert calls[-1]["horizon_days"] == 730
     assert calls[-1]["supply_change_mb_d"] == pytest.approx(-1.5)
 

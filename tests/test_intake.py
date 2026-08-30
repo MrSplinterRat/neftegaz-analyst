@@ -186,9 +186,9 @@ def test_shipped_corpus_is_readable_and_its_caveats_are_named():
         assert report.facts["pages_extractor"] > 0
         # Расхождение путей чтения — то, ради чего приёмка и заводится.
         assert "page_count_mismatch" not in {f.code for f in report.findings}
-    assert any(
-        "fonts_without_tounicode" in {f.code for f in r.findings} for r in reports
-    ), "оговорка про шрифты пропала из отчёта"
+    assert any("fonts_without_tounicode" in {f.code for f in r.findings} for r in reports), (
+        "оговорка про шрифты пропала из отчёта"
+    )
 
 
 # ── «пусто» против «не прочли» на уровне страницы ──────────────────────────

@@ -175,7 +175,9 @@ def run(only: list[str], truth: dict) -> list[dict]:
     results = []
     for name, stem, module in adapters(only):
         if isinstance(module, Exception):
-            results.append({"кандидат": name, "_модуль": stem, "ошибка": f"не загрузился: {module}"})
+            results.append(
+                {"кандидат": name, "_модуль": stem, "ошибка": f"не загрузился: {module}"}
+            )
             continue
         started = time.time()
         try:

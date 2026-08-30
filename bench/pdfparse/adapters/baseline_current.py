@@ -48,7 +48,7 @@ def parse(path: str) -> list[dict]:
             text = stream[row_start:row_end]
             dots = _DOTS.search(text)
             label = text[: dots.start()] if dots else text
-            tail = text[dots.end():] if dots else ""
+            tail = text[dots.end() :] if dots else ""
             collected.append(
                 {
                     # Подпись чистится от затянувшейся предыдущей строки: граница

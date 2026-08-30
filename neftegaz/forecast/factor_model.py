@@ -48,7 +48,9 @@ from neftegaz.forecast.models import Z_95, ForecastResult, _future_index, _valid
 __all__ = ["factor_forecast"]
 
 
-def factor_forecast(series: pd.Series, horizon: int, reports_dir: str | None = None) -> ForecastResult:
+def factor_forecast(
+    series: pd.Series, horizon: int, reports_dir: str | None = None
+) -> ForecastResult:
     """Прогноз цены по прогнозным факторам EIA.
 
     ``series`` нужен только как ЯКОРЬ: траектория строится от последней

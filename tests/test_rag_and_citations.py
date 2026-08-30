@@ -54,7 +54,11 @@ def test_overlap_must_be_smaller_than_size():
 
 def test_chunk_document_stamps_citation_metadata():
     chunks = chunk_document(
-        [{"page": 3, "text": "z" * 40}], source_name="EIA STEO", doc_date="июль 2026", size=40, overlap=0
+        [{"page": 3, "text": "z" * 40}],
+        source_name="EIA STEO",
+        doc_date="июль 2026",
+        size=40,
+        overlap=0,
     )
     assert chunks[0]["source_name"] == "EIA STEO"
     assert chunks[0]["date"] == "июль 2026"
@@ -192,8 +196,11 @@ def test_prose_ellipsis_is_not_mistaken_for_a_table_row():
 def test_row_carries_its_table_caption():
     from neftegaz.rag.chunking import chunk_pages as split
 
-    rows = [c for c in split([{"page": 7, "text": _ROW_STREAM}], size=200, overlap=40)
-            if c["kind"] == "row" and c["text"].startswith("United States")]
+    rows = [
+        c
+        for c in split([{"page": 7, "text": _ROW_STREAM}], size=200, overlap=40)
+        if c["kind"] == "row" and c["text"].startswith("United States")
+    ]
     assert rows
     assert "World Crude Oil Production" in rows[0]["context"]
 
@@ -218,13 +225,18 @@ def test_quarter_columns_are_tied_to_their_year():
         "text": _ROW_STREAM,
         # Меток ровно столько, сколько значений в строках потока: шапка иной
         # ширины отбрасывается намеренно, и тест проверял бы не то.
-        "tables": [{
-            "caption": caption,
-            "columns": ["2025Q1", "2025Q2", "2025Q3", "2025Q4", "2025"],
-        }],
+        "tables": [
+            {
+                "caption": caption,
+                "columns": ["2025Q1", "2025Q2", "2025Q3", "2025Q4", "2025"],
+            }
+        ],
     }
-    rows = [c for c in split([page], size=200, overlap=40)
-            if c["kind"] == "row" and c["text"].startswith("United States")]
+    rows = [
+        c
+        for c in split([page], size=200, overlap=40)
+        if c["kind"] == "row" and c["text"].startswith("United States")
+    ]
     assert rows, "строка таблицы не выделилась во фрагмент"
     header = rows[0]["context"].split("\n")[-1]
     assert "2025Q2" in header, f"квартал не привязан к году: {header!r}"
@@ -239,8 +251,11 @@ def test_header_falls_back_when_structure_is_absent():
     """
     from neftegaz.rag.chunking import chunk_pages as split
 
-    rows = [c for c in split([{"page": 7, "text": _ROW_STREAM}], size=200, overlap=40)
-            if c["kind"] == "row" and c["text"].startswith("United States")]
+    rows = [
+        c
+        for c in split([{"page": 7, "text": _ROW_STREAM}], size=200, overlap=40)
+        if c["kind"] == "row" and c["text"].startswith("United States")
+    ]
     assert rows
     assert "World Crude Oil Production" in rows[0]["context"]
 
@@ -392,7 +407,11 @@ def test_deny_list_and_preferred_list_do_not_overlap():
 
 def test_web_result_becomes_a_web_claim():
     result = WebResult(
-        title="Reuters", url="https://reuters.com/x", snippet="текст", domain="reuters.com", preferred=True
+        title="Reuters",
+        url="https://reuters.com/x",
+        snippet="текст",
+        domain="reuters.com",
+        preferred=True,
     )
     claim = result.as_claim()
     assert claim["source_type"] == "web"
@@ -690,8 +709,8 @@ def test_bm25_ignores_words_that_are_everywhere():
     свойство, а размер выборки.
     """
     index = _index(*[f"oil report word{n}" for n in range(200)])
-    assert index.idf("oil") < 0.01     # в каждом из двухсот
-    assert index.idf("word7") > 4.0    # ровно в одном
+    assert index.idf("oil") < 0.01  # в каждом из двухсот
+    assert index.idf("word7") > 4.0  # ровно в одном
     assert index.idf("word7") > 100 * index.idf("oil")
 
 
@@ -768,12 +787,14 @@ def _graph_with_stub_nodes(monkeypatch, route: str, report_hits: list):
     monkeypatch.setattr(G, "node_route", lambda state: {"route": route})
     monkeypatch.setattr(G, "node_forecast", lambda state: {"forecast_text": "РАСЧЁТ"})
     monkeypatch.setattr(
-        G, "node_retrieve",
+        G,
+        "node_retrieve",
         lambda state: {"report_hits": list(report_hits), "used_reports": bool(report_hits)},
     )
     monkeypatch.setattr(G, "node_web", lambda state: {"web_hits": ["веб"], "used_web": True})
     monkeypatch.setattr(
-        G, "node_answer",
+        G,
+        "node_answer",
         lambda state: {"answer": "|".join(sorted(k for k in state if k != "question"))},
     )
     return G.build_graph()
@@ -961,7 +982,9 @@ def test_context_already_present_in_the_body_is_not_repeated():
     from neftegaz.rag.chunking import context_outside
 
     assert context_outside(f"хвост {_COLUMNS} хвост", f"Table 3c. X\n{_COLUMNS}") == "Table 3c. X"
-    assert context_outside("числа без слов", f"Table 3c. X\n{_COLUMNS}") == f"Table 3c. X\n{_COLUMNS}"
+    assert (
+        context_outside("числа без слов", f"Table 3c. X\n{_COLUMNS}") == f"Table 3c. X\n{_COLUMNS}"
+    )
 
 
 def test_answering_prompt_shows_the_table_context_and_keeps_text_verbatim():
@@ -975,8 +998,15 @@ def test_answering_prompt_shows_the_table_context_and_keeps_text_verbatim():
     from neftegaz.rag.store import Hit
 
     row = "OPEC members subject to OPEC+ agreements (d) ....... 21.55 21.96"
-    hit = Hit(text=row, score=0.71, source_name="EIA STEO", date="июль 2026",
-              page=31, page_end=31, context=f"Table 3c. World Petroleum\n{_COLUMNS}")
+    hit = Hit(
+        text=row,
+        score=0.71,
+        source_name="EIA STEO",
+        date="июль 2026",
+        page=31,
+        page_end=31,
+        context=f"Table 3c. World Petroleum\n{_COLUMNS}",
+    )
     rendered = _format_report_context([hit])
 
     assert "Table 3c. World Petroleum" in rendered
@@ -997,7 +1027,7 @@ def test_last_value_of_a_row_is_not_dropped():
     stream = "United States ....... 22.75 23.49 24.10 24.09 24.82\nСледующая строка\n"
     spans = table_rows(stream)
     assert spans, "строка таблицы не распознана"
-    assert stream[spans[0][0]:spans[0][1]].rstrip().endswith("24.82")
+    assert stream[spans[0][0] : spans[0][1]].rstrip().endswith("24.82")
 
 
 def test_narrow_row_does_not_get_the_wide_header():
@@ -1125,8 +1155,13 @@ def test_chunk_id_is_derived_from_content_not_random():
     from neftegaz.rag.store import chunk_id
 
     chunk = {
-        "source_name": "EIA STEO", "date": "июль 2026", "kind": "row",
-        "page": 31, "page_end": 31, "start": 1200, "text": "United States ... 13.28",
+        "source_name": "EIA STEO",
+        "date": "июль 2026",
+        "kind": "row",
+        "page": 31,
+        "page_end": 31,
+        "start": 1200,
+        "text": "United States ... 13.28",
     }
     assert chunk_id(chunk) == chunk_id(dict(chunk)), "идентификатор не воспроизводится"
 

@@ -10,6 +10,7 @@
 Оба адаптера меряются одним прибором. Расхождение между ними — дефект
 упаковки, и стенд назовёт его сам.
 """
+
 from __future__ import annotations
 
 import sys
@@ -28,10 +29,7 @@ def parse(path: str) -> list[dict]:
         {
             "caption": table.caption,
             "columns": table.column_labels(),
-            "rows": [
-                {"label": row.label, "values": row.values(table.width)}
-                for row in table.rows
-            ],
+            "rows": [{"label": row.label, "values": row.values(table.width)} for row in table.rows],
         }
         for table in document.tables()
     ]

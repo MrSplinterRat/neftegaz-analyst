@@ -65,10 +65,19 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 __all__ = [
-    "AGREE", "ORDER", "TOKENIZE", "DIVERGE", "UNAVAILABLE", "VERDICT_ORDER",
-    "PageDiff", "CrossCheckReport",
-    "numbers_in", "compare_pages", "compare_pages_multi",
-    "crosscheck_pdf", "crosscheck_directory",
+    "AGREE",
+    "ORDER",
+    "TOKENIZE",
+    "DIVERGE",
+    "UNAVAILABLE",
+    "VERDICT_ORDER",
+    "PageDiff",
+    "CrossCheckReport",
+    "numbers_in",
+    "compare_pages",
+    "compare_pages_multi",
+    "crosscheck_pdf",
+    "crosscheck_directory",
 ]
 
 AGREE = "agree"
@@ -86,13 +95,16 @@ VERDICT_ORDER = [AGREE, ORDER, TOKENIZE, DIVERGE]
 def _worst(verdicts: list[str]) -> str:
     return max(verdicts, key=VERDICT_ORDER.index) if verdicts else AGREE
 
+
 _TOOL_TIMEOUT = 120
 
 # Число в отчётах: необязательный знак, разряды через запятую, дробная часть.
 # Требование границы слева и справа отсекает куски идентификаторов и дат вида
 # 2026-01 (они разберутся на два числа — и это верно: оба пути увидят их
 # одинаково, а нам важно СРАВНЕНИЕ, а не разбор семантики).
-_NUMBER_RE = re.compile(r"(?<![\w.])[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\w])|(?<![\w.])[-+]?\d+(?:\.\d+)?(?![\w])")
+_NUMBER_RE = re.compile(
+    r"(?<![\w.])[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\w])|(?<![\w.])[-+]?\d+(?:\.\d+)?(?![\w])"
+)
 
 
 def numbers_in(text: str) -> list[str]:
@@ -258,8 +270,12 @@ def compare_pages(text_a: str, text_b: str, page: int) -> PageDiff:
         verdict = DIVERGE
 
     return PageDiff(
-        page=page, verdict=verdict,
-        numbers_a=len(a), numbers_b=len(b), only_a=only_a, only_b=only_b,
+        page=page,
+        verdict=verdict,
+        numbers_a=len(a),
+        numbers_b=len(b),
+        only_a=only_a,
+        only_b=only_b,
     )
 
 
@@ -309,7 +325,7 @@ def compare_pages_multi(
     pairs: dict[str, str] = {}
     detail: dict[str, PageDiff] = {}
     for i, left in enumerate(names):
-        for right in names[i + 1:]:
+        for right in names[i + 1 :]:
             diff = compare_pages(texts[left], texts[right], page)
             both_positional = pos.get(left, True) and pos.get(right, True)
             pairs[f"{left}|{right}"] = reduce_to_comparable(diff.verdict, both_positional)
@@ -334,12 +350,10 @@ def compare_pages_multi(
         for suspect in names:
             others = [n for n in names if n != suspect]
             between_others = max(
-                (rank(pairs[key(a, b)]) for i, a in enumerate(others) for b in others[i + 1:]),
+                (rank(pairs[key(a, b)]) for i, a in enumerate(others) for b in others[i + 1 :]),
                 default=0,
             )
-            worse_with_suspect = min(
-                rank(pairs[key(suspect, other)]) for other in others
-            )
+            worse_with_suspect = min(rank(pairs[key(suspect, other)]) for other in others)
             if worse_with_suspect > between_others:
                 outlier = suspect
                 break
@@ -364,7 +378,9 @@ def _read_poppler(path: str) -> list[str] | None:
     try:
         done = subprocess.run(
             ["pdftotext", "-layout", path, "-"],
-            capture_output=True, timeout=_TOOL_TIMEOUT, check=False,
+            capture_output=True,
+            timeout=_TOOL_TIMEOUT,
+            check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None

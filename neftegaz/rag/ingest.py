@@ -22,11 +22,28 @@ from neftegaz.rag.confidence import annotate_chunks
 from neftegaz.rag.crosscheck import crosscheck_pdf
 from neftegaz.rag.intake import OK, inspect_pdf
 
-__all__ = ["DocumentMeta", "parse_filename", "read_pdf_pages", "mark_unreadable_pages", "ingest_file", "ingest_directory"]
+__all__ = [
+    "DocumentMeta",
+    "parse_filename",
+    "read_pdf_pages",
+    "mark_unreadable_pages",
+    "ingest_file",
+    "ingest_directory",
+]
 
 RU_MONTHS = {
-    1: "январь", 2: "февраль", 3: "март", 4: "апрель", 5: "май", 6: "июнь",
-    7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
+    1: "январь",
+    2: "февраль",
+    3: "март",
+    4: "апрель",
+    5: "май",
+    6: "июнь",
+    7: "июль",
+    8: "август",
+    9: "сентябрь",
+    10: "октябрь",
+    11: "ноябрь",
+    12: "декабрь",
 }
 
 

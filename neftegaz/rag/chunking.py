@@ -125,7 +125,7 @@ def table_rows(stream: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for dots in _DOTS.finditer(stream):
         window_start = max(0, dots.start() - ROW_LABEL_WINDOW)
-        window = stream[window_start:dots.start()]
+        window = stream[window_start : dots.start()]
         numbers = list(_NUMBER.finditer(window))
         label_start = window_start + (numbers[-1].end() if numbers else 0)
         while label_start < dots.start() and stream[label_start] in " \t\n":
@@ -203,7 +203,7 @@ def is_column_header(line: str) -> bool:
 def values_in_row(row_text: str) -> int:
     """Сколько значений несёт строка таблицы: числа и прочерки после выноски."""
     dots = _DOTS.search(row_text)
-    tail = row_text[dots.end():] if dots else row_text
+    tail = row_text[dots.end() :] if dots else row_text
     return sum(1 for token in tail.split() if _VALUE_TOKEN.match(token))
 
 
@@ -227,12 +227,12 @@ def column_header_after(stream: str, position: int) -> str:
     Пустая строка означает, что шапки нет, — законный исход: у части таблиц
     столбцы названы внутри самих строк, а из части их не извлёк конвертер.
     """
-    window = stream[position:position + HEADER_SEARCH_WINDOW]
+    window = stream[position : position + HEADER_SEARCH_WINDOW]
     spans = table_rows(window)
     if not spans:
         return ""
     first_row = spans[0][0]
-    width = values_in_row(window[first_row:spans[0][1]])
+    width = values_in_row(window[first_row : spans[0][1]])
     if width == 0:
         return ""
 
@@ -283,9 +283,7 @@ def _nearest_caption(captions: list[tuple[int, str]], position: int) -> int:
     return bisect_right([start for start, _ in captions], position) - 1
 
 
-def table_context_before(
-    captions: list[tuple[int, str]], headers: list[str], position: int
-) -> str:
+def table_context_before(captions: list[tuple[int, str]], headers: list[str], position: int) -> str:
     """Заголовок таблицы и шапка её колонок для места ``position``.
 
     Обе части подчиняются одному правилу удалённости: чужая шапка так же врёт,
@@ -345,10 +343,8 @@ def row_pairs(row_text: str, header: str) -> str:
     dots = _DOTS.search(row_text)
     if dots is None:
         return ""
-    name = " ".join(row_text[:dots.start()].split())
-    values = [
-        token for token in row_text[dots.end():].split() if _VALUE_TOKEN.match(token)
-    ]
+    name = " ".join(row_text[: dots.start()].split())
+    values = [token for token in row_text[dots.end() :].split() if _VALUE_TOKEN.match(token)]
     if len(values) != len(labels):
         return ""
 

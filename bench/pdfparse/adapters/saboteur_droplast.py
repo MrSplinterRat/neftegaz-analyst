@@ -4,6 +4,7 @@
 переводом строки. Так у 903 строк из 938 пропадала годовая колонка, то есть
 прогноз на дальний год — тот самый, о котором спрашивают.
 """
+
 from __future__ import annotations
 
 from adapters._perfect import tables

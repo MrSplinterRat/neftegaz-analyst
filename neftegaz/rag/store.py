@@ -140,10 +140,10 @@ RERANK_POOL_FACTOR = 4
 # своего замера под него у нас нет, и выдавать его за настроенный нельзя.
 RRF_K = 60
 
-DIGIT_RATIO_FLOOR = 0.02   # ниже этого текст считается прозой без данных
+DIGIT_RATIO_FLOOR = 0.02  # ниже этого текст считается прозой без данных
 DIGIT_RATIO_CEILING = 0.20  # выше — плотная таблица; дальше бонус не растёт
 
-DATA_BONUS = 0.06           # максимальная прибавка к косинусу
+DATA_BONUS = 0.06  # максимальная прибавка к косинусу
 
 _NUMBER = re.compile(r"-?\d+\.?\d*")
 
@@ -467,7 +467,9 @@ class ReportStore:
 
     # ── read path ──────────────────────────────────────────────────────────
 
-    def search(self, query: str, top_k: int | None = None, min_score: float | None = None) -> list[Hit]:
+    def search(
+        self, query: str, top_k: int | None = None, min_score: float | None = None
+    ) -> list[Hit]:
         """Return the best-matching chunks above the score floor.
 
         An empty list is a meaningful answer: it means the corpus does not

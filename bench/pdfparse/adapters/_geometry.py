@@ -22,6 +22,7 @@
 
 Запуск:  python3 eia_table_rows.py <файл.pdf> [--engine pdfplumber|poppler|pymupdf] [страница]
 """
+
 # ruff: noqa: E701, E702, UP031
 # ★Плотный стиль этого файла — осознанный и локальный: это standalone-скрипт
 # разбора геометрии, где `if …: continue` и `a = x; break` держат шаг алгоритма
@@ -34,33 +35,40 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-VALUE = re.compile(r'^(-|--|NA|W|-?\d[\d,]*\.\d+)$')
-CAPTION = re.compile(r'^Table\s+\d+[a-z]?\.')
+VALUE = re.compile(r"^(-|--|NA|W|-?\d[\d,]*\.\d+)$")
+CAPTION = re.compile(r"^Table\s+\d+[a-z]?\.")
 Y_TOL = 1.6
 NS = "{http://www.w3.org/1999/xhtml}"
 
 
 def words_pdfplumber(path):
     import pdfplumber
+
     with pdfplumber.open(path) as pdf:
         for p in pdf.pages:
-            yield [(w["text"], w["x0"], w["x1"], w["top"])
-                   for w in p.extract_words(use_text_flow=False)]
+            yield [
+                (w["text"], w["x0"], w["x1"], w["top"])
+                for w in p.extract_words(use_text_flow=False)
+            ]
             p.flush_cache()
 
 
 def words_pymupdf(path):
     import pymupdf
+
     for p in pymupdf.open(path):
         yield [(w[4], w[0], w[2], w[1]) for w in p.get_text("words")]
 
 
 def words_poppler(path):
-    out = subprocess.run(["/bin/pdftotext", "-bbox-layout", path, "-"],
-                         capture_output=True, check=True).stdout
+    out = subprocess.run(
+        ["/bin/pdftotext", "-bbox-layout", path, "-"], capture_output=True, check=True
+    ).stdout
     for pg in ET.fromstring(out).iter(NS + "page"):
-        yield [(w.text or "", float(w.get("xMin")), float(w.get("xMax")), float(w.get("yMin")))
-               for w in pg.iter(NS + "word")]
+        yield [
+            (w.text or "", float(w.get("xMin")), float(w.get("xMax")), float(w.get("yMin")))
+            for w in pg.iter(NS + "word")
+        ]
 
 
 ENGINES = {"pdfplumber": words_pdfplumber, "pymupdf": words_pymupdf, "poppler": words_poppler}
@@ -71,10 +79,14 @@ def to_lines(ws, tol=Y_TOL):
     out, cur, ctop = [], [], None
     for w in ws:
         if ctop is None or abs(w[3] - ctop) <= tol:
-            cur.append(w); ctop = w[3] if ctop is None else ctop
+            cur.append(w)
+            ctop = w[3] if ctop is None else ctop
         else:
-            out.append(cur); cur = [w]; ctop = w[3]
-    if cur: out.append(cur)
+            out.append(cur)
+            cur = [w]
+            ctop = w[3]
+    if cur:
+        out.append(cur)
     return out
 
 
@@ -85,20 +97,25 @@ def parse_page(ws, inherited_caption=None):
     for L in lines:
         s = " ".join(w[0] for w in sorted(L, key=lambda w: w[1]))
         if CAPTION.match(s):
-            caption = s; break
+            caption = s
+            break
     hi = None
     for k, L in enumerate(lines):
         toks = [w[0] for w in L]
         q = sum(1 for t in toks if t in ("Q1", "Q2", "Q3", "Q4") or (len(t) == 4 and t.isdigit()))
         if q >= 8 and q >= len(toks) - 2:
-            hi = k; break
+            hi = k
+            break
     if hi is None:
         return caption, None, []
     hdr = sorted(lines[hi], key=lambda w: w[1])
     centers = [(w[1] + w[2]) / 2 for w in hdr]
     names = [w[0] for w in hdr]
-    band = [w for w in (sorted(lines[hi - 1], key=lambda w: w[1]) if hi else [])
-            if (len(w[0]) == 4 and w[0].isdigit()) or w[0] == "Year"]
+    band = [
+        w
+        for w in (sorted(lines[hi - 1], key=lambda w: w[1]) if hi else [])
+        if (len(w[0]) == 4 and w[0].isdigit()) or w[0] == "Year"
+    ]
     columns = []
     for c, n in zip(centers, names, strict=True):  # оба из одного hdr, длины равны по построению
         b = min(band, key=lambda w: abs((w[1] + w[2]) / 2 - c))[0] if band else ""
@@ -114,14 +131,15 @@ def parse_page(ws, inherited_caption=None):
 
     rows = []
     for k, L in enumerate(lines):
-        if k == hi: continue
+        if k == hi:
+            continue
         L = sorted(L, key=lambda w: w[1])
         vals = [w for w in L if VALUE.match(w[0]) and (w[1] + w[2]) / 2 > left]
-        if len(vals) < 3: continue
+        if len(vals) < 3:
+            continue
         ids = {id(w) for w in vals}
         label = " ".join(w[0] for w in L if id(w) not in ids).strip(" .")
-        rows.append({"label": label,
-                     "cells": [(col_of((w[1] + w[2]) / 2), w[0]) for w in vals]})
+        rows.append({"label": label, "cells": [(col_of((w[1] + w[2]) / 2), w[0]) for w in vals]})
     return caption, columns, rows
 
 
@@ -143,9 +161,12 @@ if __name__ == "__main__":
         args = [a for a in args if a != engine]
     only = int(args[1]) if len(args) > 1 else None
     for t in parse(args[0], engine):
-        if only and t["page"] != only: continue
+        if only and t["page"] != only:
+            continue
         print("=== стр %d | %s" % (t["page"], t["caption"]))
         print("    колонки: %s" % " | ".join(t["columns"]))
         for r in t["rows"]:
-            print("    %-46s %s" % (r["label"][:46],
-                  " ".join("%s=%s" % (t["columns"][c], v) for c, v in r["cells"])))
+            print(
+                "    %-46s %s"
+                % (r["label"][:46], " ".join("%s=%s" % (t["columns"][c], v) for c, v in r["cells"]))
+            )

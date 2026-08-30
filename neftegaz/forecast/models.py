@@ -277,9 +277,7 @@ def arima_forecast(
     )
 
 
-def forecast(
-    series: pd.Series, horizon: int, method: str = "auto", **kwargs
-) -> ForecastResult:
+def forecast(series: pd.Series, horizon: int, method: str = "auto", **kwargs) -> ForecastResult:
     """Dispatch to a named method.
 
     ``method="auto"`` prefers ARIMA and falls back to exponential smoothing if

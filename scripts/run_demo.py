@@ -150,8 +150,10 @@ def main() -> int:
             sources.append("веб")
         if state.get("forecast_text"):
             sources.append("расчёт")
-        print(f"    {elapsed:5.1f} с | ветка {state.get('route', '?')} | "
-              f"{' + '.join(sources) or 'без источников'} → {path.name}")
+        print(
+            f"    {elapsed:5.1f} с | ветка {state.get('route', '?')} | "
+            f"{' + '.join(sources) or 'без источников'} → {path.name}"
+        )
         summary.append((scenario["id"], state.get("route", "?"), elapsed))
 
     print()

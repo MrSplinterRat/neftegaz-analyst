@@ -327,11 +327,7 @@ def test_elasticity_saturates_outside_the_interpolation_range(literature_mode):
     middle = elasticity_for_horizon(
         (literature_mode.elasticity_short_days + literature_mode.elasticity_long_days) // 2
     )
-    assert (
-        literature_mode.demand_elasticity_long
-        < middle
-        < literature_mode.demand_elasticity_short
-    )
+    assert literature_mode.demand_elasticity_long < middle < literature_mode.demand_elasticity_short
 
 
 def test_measured_elasticity_replaces_the_literature_value_on_the_short_end():
@@ -418,9 +414,7 @@ def test_report_says_the_multiplier_is_already_applied(series, tmp_path):
     """Отчёт обязан сказать это словами, а не оставить на догадку читателя."""
     import neftegaz.tools.forecast_tool as tool
 
-    frame = pd.DataFrame(
-        {"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()}
-    )
+    frame = pd.DataFrame({"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()})
     path = tmp_path / "prices.csv"
     frame.to_csv(path, index=False)
 
@@ -442,18 +436,14 @@ def test_scenario_numbers_are_marked_at_the_line_itself(series, tmp_path):
     """Пометка стоит у самой цифры: абзацем ниже её связывают не всегда."""
     import neftegaz.tools.forecast_tool as tool
 
-    frame = pd.DataFrame(
-        {"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()}
-    )
+    frame = pd.DataFrame({"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()})
     path = tmp_path / "prices.csv"
     frame.to_csv(path, index=False)
 
     with_scenario = tool.run_forecast(
         horizon_days=30, method="ses", supply_change_mb_d=-1.5, prices_csv=str(path)
     ).as_text()
-    without = tool.run_forecast(
-        horizon_days=30, method="ses", prices_csv=str(path)
-    ).as_text()
+    without = tool.run_forecast(horizon_days=30, method="ses", prices_csv=str(path)).as_text()
 
     assert "множитель уже учтён" in with_scenario
     # Без сценария пометки быть не должно: она сообщала бы о том, чего не было.

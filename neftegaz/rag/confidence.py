@@ -46,10 +46,19 @@ from neftegaz.rag.crosscheck import _worst as worst_verdict
 from neftegaz.rag.intake import IntakeReport
 
 __all__ = [
-    "DIRECT", "GEOMETRY", "DISPUTED", "UNCHECKED",
-    "LEVEL_ORDER", "LEVEL_LABEL", "INDEXED_READER",
-    "level_of_verdict", "worst_level", "document_caveats",
-    "effective_verdict", "chunk_confidence", "annotate_chunks",
+    "DIRECT",
+    "GEOMETRY",
+    "DISPUTED",
+    "UNCHECKED",
+    "LEVEL_ORDER",
+    "LEVEL_LABEL",
+    "INDEXED_READER",
+    "level_of_verdict",
+    "worst_level",
+    "document_caveats",
+    "effective_verdict",
+    "chunk_confidence",
+    "annotate_chunks",
 ]
 
 # Чей текст лежит в индексе. Именно о нём говорит ступень уверенности, и
@@ -96,9 +105,7 @@ def worst_level(levels) -> str:
     return worst if worst is not None else UNCHECKED
 
 
-def effective_verdict(
-    diff: PageDiff, indexed: str = INDEXED_READER
-) -> tuple[str, str | None]:
+def effective_verdict(diff: PageDiff, indexed: str = INDEXED_READER) -> tuple[str, str | None]:
     """Вердикт, которым судят ПРОИНДЕКСИРОВАННЫЙ текст, и пояснение к нему.
 
     ★ЗАЧЕМ ЭТО ОТДЕЛЬНО ОТ `PageDiff.verdict`. Сводный вердикт страницы — худший
@@ -129,11 +136,7 @@ def effective_verdict(
     if not diff.pairs or not diff.outlier or diff.outlier == indexed:
         return diff.verdict, None
 
-    kept = [
-        verdict
-        for name, verdict in diff.pairs.items()
-        if diff.outlier not in name.split("|")
-    ]
+    kept = [verdict for name, verdict in diff.pairs.items() if diff.outlier not in name.split("|")]
     if not kept:
         return diff.verdict, None
 
