@@ -234,3 +234,123 @@ def test_one_source_down_keeps_its_own_note():
 def test_no_note_at_all_when_both_sources_worked():
     """Отрицательный контроль: оговорка на каждом ответе — шум, который не читают."""
     assert prompts.sources_status_note("", "") == ""
+
+
+def test_the_note_does_not_claim_content_that_is_not_there(monkeypatch):
+    """★Третья ось: отказала не только оба источника, но и языковая модель.
+
+    Оговорка про молчащие источники говорит «всё, что написано выше». Когда
+    модель тоже отказала, выше не написано НИЧЕГО — и фраза утверждает про
+    содержимое, которого нет. Это тот же дефект, что был у двух половин
+    оговорки; он пережил их починку, потому что тогда перебирались сочетания
+    ИСТОЧНИКОВ, а отказ модели в перебор не входил.
+
+    Перечень покрывает лишь те оси, которые в него заложены.
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("Connection error.")
+
+    monkeypatch.setattr(graph_module, "ask", _boom, raising=True)
+    state = graph_module.node_answer(
+        {
+            "question": QUESTION,
+            "reports_status": "failed: коллекция повреждена",
+            "web_status": "failed: сеть недоступна",
+        }
+    )
+    assert "НИ ОДИН ВНЕШНИЙ ИСТОЧНИК НЕ ОТВЕТИЛ" in state["answer"]
+    assert "Ответить нечем" in state["answer"]
+    assert "написано выше" not in state["answer"], state["answer"]
+
+
+def test_the_note_still_claims_content_when_the_model_did_answer(monkeypatch):
+    """Отрицательный контроль: с ответом модели фраза про «выше» законна и нужна.
+
+    Ослабь её всегда — и пропадёт единственное предложение, говорящее
+    проверяющему, что ответ ничем не подтверждён.
+    """
+    monkeypatch.setattr(graph_module, "ask", lambda *a, **k: "Цена около 92.", raising=True)
+    state = graph_module.node_answer(
+        {
+            "question": QUESTION,
+            "reports_status": "failed: коллекция повреждена",
+            "web_status": "failed: сеть недоступна",
+        }
+    )
+    assert "Всё, что написано выше" in state["answer"]
+    assert "Ответить нечем" not in state["answer"]
+
+
+def test_the_fallback_keeps_the_material_when_only_the_model_failed(monkeypatch):
+    """Отказала только модель — материал обязан дойти до человека читаемым."""
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("Connection error.")
+
+    monkeypatch.setattr(graph_module, "ask", _boom, raising=True)
+    state = graph_module.node_answer({"question": QUESTION, "report_hits": [_Hit()]})
+    assert "Языковая модель недоступна" in state["answer"]
+    assert "с. 36" in state["answer"], state["answer"]
+    assert "13.28" in state["answer"]
+    assert "Ответить нечем" not in state["answer"]
+
+
+# ── состояние источников не переживает свой ход ────────────────────────────
+
+
+def test_a_source_failure_does_not_leak_into_the_next_turn(monkeypatch):
+    """★Поле-однодневка, не сброшенное явно, живёт в чекпоинтере вечно.
+
+    `node_web` выполняется только на веб-ветке, а `node_answer` читает
+    `web_status` всегда. Отказ веба, случившийся на вопросе «какая сейчас цена
+    Brent», приезжал оговоркой в ответ на СЛЕДУЮЩИЙ вопрос, который в веб не
+    ходил вовсе: человеку сообщалось об отказе, которого в этом ходу не было.
+
+    Правило записано в самом графе рядом с `scenario_waived` — «оба поля
+    пишутся КАЖДЫЙ ход, а не только когда меняются». Новые поля под него не
+    попали. Проверяется он единственным способом, каким такое проверяется, —
+    ДВУМЯ ходами одного разговора.
+    """
+    from neftegaz.agent.graph import build_checkpointer, build_graph, new_thread_id
+    from neftegaz.rag.store import Hit
+
+    hit = Hit(
+        text="Brent Spot Average ..... 91.2 92.7 93.4 92.1",
+        score=0.75,
+        source_name="EIA STEO",
+        date="2026-07",
+        page=34,
+        page_end=34,
+        context="Table 2. Energy Prices\nQ1 Q2 Q3 2026",
+    )
+
+    class _Store:
+        def search(self, *_args, **_kwargs):
+            return [hit, hit, hit]
+
+        def count(self):
+            return 9450
+
+    monkeypatch.setattr("neftegaz.rag.store.get_store", lambda: _Store(), raising=True)
+    monkeypatch.setattr(
+        "neftegaz.tools.web.search_web_with_status",
+        lambda *a, **k: ([], "failed: сеть недоступна"),
+        raising=True,
+    )
+    monkeypatch.setattr(graph_module, "ask", lambda *a, **k: "Цена около 92.7.", raising=True)
+    monkeypatch.setattr(
+        graph_module, "node_forecast", lambda state: {"forecast_text": ""}, raising=True
+    )
+
+    graph = build_graph(build_checkpointer())
+    config = {"configurable": {"thread_id": new_thread_id()}}
+
+    # Ход первый: «сейчас» уводит в веб, веб отказывает — оговорка законна.
+    first = graph.invoke({"question": "какая сейчас цена Brent"}, config=config)
+    assert "Веб-поиск НЕ ВЫПОЛНЕН" in first["answer"], first["answer"]
+
+    # Ход второй: в веб не ходили вовсе — оговорки быть не должно.
+    second = graph.invoke({"question": "спрогнозируй Brent на 30 дней"}, config=config)
+    assert second.get("web_status", "") == "", second.get("web_status")
+    assert "Веб-поиск НЕ ВЫПОЛНЕН" not in second["answer"], second["answer"]

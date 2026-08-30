@@ -412,7 +412,19 @@ def node_route(state: AgentState) -> AgentState:
     #
     # ★Оба поля пишутся КАЖДЫЙ ход, а не только когда меняются: они живут в
     # чекпоинтере и без явного сброса протекли бы в следующие вопросы разговора.
-    resolved: AgentState = {"pending_question": "", "scenario_waived": False}
+    # ★Состояние источников сбрасывается ЗДЕСЬ, вместе с остальными полями-однодневками.
+    # Оно живёт в чекпоинтере, а пишется не каждый ход: `node_web` выполняется только на
+    # веб-ветке, `node_retrieve` — не на всякой. Без сброса отказ веба, случившийся на
+    # вопросе «какая сейчас цена Brent», приезжал оговоркой в ОТВЕТ НА СЛЕДУЮЩИЙ вопрос,
+    # который в веб не ходил вовсе, — то есть человеку сообщалось об отказе, которого в
+    # этом ходу не было. Правило записано двумя абзацами ниже про `scenario_waived`;
+    # новые поля под него не попали, и это стоило замера.
+    resolved: AgentState = {
+        "pending_question": "",
+        "scenario_waived": False,
+        "reports_status": "",
+        "web_status": "",
+    }
     pending = state.get("pending_question") or ""
     if pending:
         if _WAIVER.search(question.lower()):
@@ -625,6 +637,7 @@ def node_answer(state: AgentState) -> AgentState:
     forecast_text = state.get("forecast_text", "")
     reports_status = state.get("reports_status", "")
     web_status = state.get("web_status", "")
+    answer_present = True
 
     try:
         answer = ask(
@@ -643,6 +656,9 @@ def node_answer(state: AgentState) -> AgentState:
         # Degrade to the raw material rather than losing the work: a forecast
         # the user can read beats an error page.
         fallback = forecast_text or report_context or web_context
+        # ★Оговорка ниже говорит про то, что «написано выше». Когда отказала и
+        # модель, и оба источника, выше не написано ничего, и говорить не о чем.
+        answer_present = bool(fallback)
         answer = (
             f"Языковая модель недоступна ({exc}).\n\nСобранные данные:\n\n{fallback}"
             if fallback
@@ -652,7 +668,7 @@ def node_answer(state: AgentState) -> AgentState:
     # Сказанное модели доходит до человека только пересказом, а пересказчик
     # вправе счесть оговорку неважной и потерять её. То, каким источником
     # получен ответ, проверяющий обязан увидеть буквально.
-    answer += prompts.sources_status_note(reports_status, web_status)
+    answer += prompts.sources_status_note(reports_status, web_status, answer_present)
     # Ход дописывается в историю здесь, в единственном месте, где разговор
     # действительно состоялся: вопрос задан и ответ получен.
     return {"answer": answer, "history": [{"question": question, "answer": answer}]}
