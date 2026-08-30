@@ -324,6 +324,94 @@ def test_a_section_is_not_pulled_into_the_label_by_the_return():
     assert _first_row(stream, [(0, "Energy Production")]).startswith("Lower 48 States")
 
 
+# ── единицы измерения на отдельной строке ──────────────────────────────────
+# Имя показателя стои́т одной строкой, единицы в скобках — следующей, и числа
+# идут за ними. Возврат обязан склеить обе половины; когда он отказывал,
+# подписью оставалась закрывающая скобка, и фрагмент выходил НЕМЫМ: числа есть,
+# сказать, чего они, нечем. Замер на отчёте за июль 2026: 6 строк из 938.
+
+
+def test_a_lone_comma_is_not_counted_as_a_number():
+    """★Разделитель тысяч втащил запятую в класс «цифра или запятая».
+
+    `_NUMBER` требовал лишь знак из этого класса, поэтому ОДИНОКАЯ ЗАПЯТАЯ
+    считалась числом: у куска «(Index, 2017=100» их выходило три вместо двух, и
+    охрана «ряд чисел = чужие значения» отвергала законный возврат.
+    """
+    from neftegaz.rag.chunking import _NUMBER
+
+    assert _NUMBER.findall("(Index, 2017=100") == ["2017", "100"]
+
+    stream = (
+        "Percent change from prior year ..... 2.0 2.1 2.3 2.0\n"
+        "GDP Implicit Price Deflator\n"
+        "(Index, 2017=100) ..... 127.6 128.3 129.5 130.6\n"
+    )
+    from neftegaz.rag.chunking import table_rows
+
+    deflator = [stream[a:b] for a, b in table_rows(stream) if "127.6" in stream[a:b]]
+    assert deflator, stream
+    assert deflator[0].startswith("GDP Implicit Price Deflator"), deflator[0]
+
+
+def test_numbers_glued_inside_one_word_are_not_a_row_of_values():
+    """★Охрана считает ЗНАЧЕНИЯ, а не вхождения цифр.
+
+    В «(index, 1982-1984=1.00)» три настоящих числа, но все внутри одного слова.
+    Чужое значение отличает то, что оно стои́т отдельным токеном. Предельный
+    случай корпуса — Table 9a, с. 52.
+    """
+    from neftegaz.rag.chunking import table_rows
+
+    stream = (
+        "Natural Gas-weighted manufacturing (b) ..... 94.1 94.3 95.7 94.2\n"
+        "Consumer Price Index (all urban consumers) (a)\n"
+        "(index, 1982-1984=1.00) ..... 3.19 3.21 3.23 3.26\n"
+    )
+    consumer = [stream[a:b] for a, b in table_rows(stream) if "3.19" in stream[a:b]]
+    assert consumer, stream
+    assert consumer[0].startswith("Consumer Price Index"), consumer[0]
+
+
+def test_three_separate_values_still_stop_the_return():
+    """★Отрицательный контроль ослабленной охраны, и он несущий.
+
+    Считать значения вместо цифр — значит пропускать больше. Пропустить ряд
+    ОТДЕЛЬНЫХ значений нельзя: ровно на нём возврат однажды перешагнул чужую
+    строку, не распознанную строкой, и собрал подпись в 200 знаков. Здесь у
+    предыдущей строки нет выноски из точек, то есть строкой она не признана, —
+    и остановить возврат обязаны именно её значения.
+    """
+    from neftegaz.rag.chunking import table_rows
+
+    stream = "Crude oil 7.41 8.21 9.02\nNatural gas ..... 2.37 2.38 2.59 2.55\n"
+    gas = [stream[a:b] for a, b in table_rows(stream) if "2.37" in stream[a:b]]
+    assert gas, stream
+    assert "7.41" not in gas[0], gas[0]
+    assert gas[0].startswith("Natural gas"), gas[0]
+
+
+def test_a_column_header_also_stops_the_return():
+    """★Чужая ячейка бывает и обозначением периода, а не только числом.
+
+    Шапка колонок — такая же не-часть имени строки, как ряд значений. Прежняя
+    охрана останавливалась на ней ПО СЛУЧАЙНОСТИ: из «Q1 Q2 Q3 2025» регулярка
+    чисел вылавливала «1», «2», «3» внутри самих обозначений — то есть была
+    права по итогу и неправа по причине. Как только счёт стал вестись по
+    отдельным ячейкам, случайная опора исчезла, и подпись строки уехала в
+    предыдущее предложение вместе со всей шапкой.
+    """
+    from neftegaz.rag.chunking import table_rows
+
+    stream = (
+        "Weather forecasts from the agency.Q1 Q2 Q3 2025\n"
+        "West Texas Intermediate Spot Average ..... 71.85 64.63 65.78 65.40\n"
+    )
+    wti = [stream[a:b] for a, b in table_rows(stream) if "71.85" in stream[a:b]]
+    assert wti, stream
+    assert wti[0].startswith("West Texas Intermediate"), wti[0]
+
+
 # ── позиция раздела в тексте страницы ──────────────────────────────────────
 
 
