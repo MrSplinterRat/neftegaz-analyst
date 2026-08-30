@@ -116,6 +116,11 @@ class AgentState(TypedDict, total=False):
     # поиск отказал. Без этого поля все три вида пустоты выглядели одним, и
     # «я не смог» уходило в ответ как «этого нет».
     reports_status: str
+    # То же самое для веб-поиска: "" — прошёл, "unavailable: …" — библиотеки нет,
+    # "failed: …" — сеть или разбор отказали. Веб — источник дополнительный, но
+    # молчание его отказа обходится так же дорого: на вопросе про сегодняшнюю
+    # котировку он единственный, кто мог ответить.
+    web_status: str
     # Ходы разговора. Аннотация задаёт reducer: LangGraph не заменяет поле
     # новым значением, а прогоняет старое и новое через merge_history.
     history: Annotated[list[dict], merge_history]
@@ -521,11 +526,26 @@ def node_retrieve(state: AgentState) -> AgentState:
 
 
 def node_web(state: AgentState) -> AgentState:
-    """Search the web. Reached only when reports are insufficient or stale."""
-    from neftegaz.tools.web import search_web
+    """Search the web. Reached only when reports are insufficient or stale.
 
-    hits = search_web(state["question"])
-    return {"web_hits": hits, "used_web": bool(hits)}
+    ★ОХРАНА ЗДЕСЬ БЫЛА НУЖНА И ЕЁ НЕ БЫЛО. У всех соседних узлов отказ
+    инструмента ловится и превращается в состояние; у этого — вылетал наружу и
+    валил весь прогон. Дополнительный источник не вправе уносить с собой ответ,
+    который уже собран по приоритетному.
+
+    ★И пустая выдача здесь, как у отчётов, бывает трёх видов: поиск прошёл и
+    ничего не нашлось · библиотеки поиска нет в сборке · поиск отказал. Раньше
+    все три превращались в одну строку промпта «(веб-поиск не выполнялся или
+    ничего не вернул)», из которой нельзя понять, промолчал веб или не был
+    спрошен.
+    """
+    from neftegaz.tools.web import search_web_with_status
+
+    try:
+        hits, status = search_web_with_status(state["question"])
+    except Exception as exc:  # noqa: BLE001 - отказ веба не вправе убить ответ
+        return {"web_hits": [], "used_web": False, "web_status": f"failed: {exc}"}
+    return {"web_hits": hits, "used_web": bool(hits), "web_status": status}
 
 
 def node_forecast(state: AgentState) -> AgentState:
@@ -604,6 +624,7 @@ def node_answer(state: AgentState) -> AgentState:
     # its own citation format rather than being folded into the report context.
     forecast_text = state.get("forecast_text", "")
     reports_status = state.get("reports_status", "")
+    web_status = state.get("web_status", "")
 
     try:
         answer = ask(
@@ -615,6 +636,7 @@ def node_answer(state: AgentState) -> AgentState:
                 forecast_text,
                 history_context,
                 reports_status,
+                web_status,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -630,7 +652,7 @@ def node_answer(state: AgentState) -> AgentState:
     # Сказанное модели доходит до человека только пересказом, а пересказчик
     # вправе счесть оговорку неважной и потерять её. То, каким источником
     # получен ответ, проверяющий обязан увидеть буквально.
-    answer += prompts.reports_status_note(reports_status)
+    answer += prompts.sources_status_note(reports_status, web_status)
     # Ход дописывается в историю здесь, в единственном месте, где разговор
     # действительно состоялся: вопрос задан и ответ получен.
     return {"answer": answer, "history": [{"question": question, "answer": answer}]}

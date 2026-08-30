@@ -21,7 +21,13 @@ from urllib.parse import urlparse
 
 from neftegaz.config import settings
 
-__all__ = ["WebResult", "search_web", "DENY_DOMAINS", "PREFERRED_DOMAINS"]
+__all__ = [
+    "DENY_DOMAINS",
+    "PREFERRED_DOMAINS",
+    "WebResult",
+    "search_web",
+    "search_web_with_status",
+]
 
 # Tabloids, content farms and aggregators that republish without attribution.
 # Deliberately short and specific: a long speculative list would silently drop
@@ -114,25 +120,49 @@ def _clean(text: str) -> str:
 
 
 def search_web(query: str, max_results: int | None = None) -> list[WebResult]:
-    """Search the web and return filtered, ranked results.
+    """Найденное в вебе — без состояния поиска.
 
-    Returns an empty list rather than raising when search is unavailable: the
-    agent must still be able to answer from the report corpus when the machine
-    is offline, and a network failure is not an error in the answer path.
+    ★Тонкая обёртка над :func:`search_web_with_status`, оставленная ради
+    вызывающих, которым довольно списка. Читать ТОЛЬКО её недостаточно: пустой
+    список означает и «поиск прошёл, ничего не нашлось», и «поиск не состоялся»,
+    а это разные вещи, и вторую надо произнести вслух. Кто принимает решение —
+    берёт полный ответ, а не этот список.
+    """
+    return search_web_with_status(query, max_results)[0]
+
+
+def search_web_with_status(
+    query: str, max_results: int | None = None
+) -> tuple[list[WebResult], str]:
+    """Найденное в вебе И состояние поиска.
+
+    Состояние — пустая строка (поиск прошёл), ``"unavailable: …"`` (библиотеки
+    поиска нет в сборке) или ``"failed: …"`` (сеть или разбор отказали).
+
+    ★ЗАЧЕМ ПАРА, А НЕ СПИСОК. Пустой список означал три разных положения дел
+    сразу, и в промпт уходила одна строка на все три — «(веб-поиск не выполнялся
+    или ничего не вернул)». Союз «или» делает её правдивой и потому бесполезной:
+    из неё нельзя понять, промолчал веб или не был спрошен. Худший случай — когда
+    молчат ОБА источника: ответ встаёт на память модели, а человеку это ничем не
+    показано.
+
+    Ни один исход не выражается исключением: отсутствие сети — не ошибка
+    программы, а обстоятельство, в котором агент обязан продолжать работать по
+    корпусу отчётов. Обстоятельство возвращается значением и едет дальше как факт.
     """
     limit = settings.web_results if max_results is None else max_results
     try:
         from ddgs import DDGS
-    except ImportError:  # pragma: no cover - depends on environment
-        return []
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        return [], f"unavailable: библиотека веб-поиска не установлена ({exc})"
 
     try:
         with DDGS() as engine:
             # Over-fetch: filtering removes some hits, and asking for exactly
             # `limit` would leave us short whenever a tabloid ranks well.
             raw = list(engine.text(query, region=settings.web_region, max_results=limit * 3))
-    except Exception:  # noqa: BLE001 - network/parse failures must not propagate
-        return []
+    except Exception as exc:  # noqa: BLE001 - network/parse failures must not propagate
+        return [], f"failed: {exc}"
 
     results: list[WebResult] = []
     seen: set[str] = set()
@@ -157,4 +187,4 @@ def search_web(query: str, max_results: int | None = None) -> list[WebResult]:
     # Stable sort: preferred domains first, original relevance order preserved
     # inside each group.
     results.sort(key=lambda r: not r.preferred)
-    return results[:limit]
+    return results[:limit], ""

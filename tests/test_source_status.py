@@ -139,3 +139,98 @@ def test_the_human_is_not_bothered_when_everything_worked(monkeypatch):
     monkeypatch.setattr(graph_module, "ask", lambda *a, **k: "Добыча растёт.", raising=True)
     state = graph_module.node_answer({"question": QUESTION, "reports_status": ""})
     assert state["answer"] == "Добыча растёт."
+
+
+# ── та же болезнь на веб-стороне ───────────────────────────────────────────
+#
+# `node_web` не ловил исключений ВОВСЕ — отказ поиска валил весь прогон графа, —
+# а пустая выдача означала три разных вещи сразу, и в промпт уходила одна строка
+# на все три: «(веб-поиск не выполнялся или ничего не вернул)». Союз «или» делает
+# её правдивой и потому бесполезной.
+
+
+def _web(monkeypatch, replacement) -> dict:
+    monkeypatch.setattr(
+        "neftegaz.tools.web.search_web_with_status", replacement, raising=True
+    )
+    return graph_module.node_web({"question": "какая сейчас цена Brent"})
+
+
+def test_a_failed_web_search_is_reported_as_a_failure(monkeypatch):
+    state = _web(monkeypatch, lambda *a, **k: ([], "failed: сеть недоступна"))
+    assert state["web_status"].startswith("failed")
+    assert "сеть недоступна" in state["web_status"]
+
+
+def test_a_missing_search_library_is_reported_as_unavailable(monkeypatch):
+    state = _web(monkeypatch, lambda *a, **k: ([], "unavailable: ddgs не установлен"))
+    assert state["web_status"].startswith("unavailable")
+
+
+def test_an_empty_but_working_web_search_carries_no_status(monkeypatch):
+    """Отрицательный контроль: «сходили и не нашли» — законный исход."""
+    assert _web(monkeypatch, lambda *a, **k: ([], ""))["web_status"] == ""
+
+
+def test_the_web_node_survives_an_exception(monkeypatch):
+    """★Дополнительный источник не вправе уносить с собой уже собранный ответ.
+
+    У соседних узлов охрана есть, у этого её не было: отказ вылетал наружу и
+    валил прогон графа целиком. Падение вместо ответа хуже молчаливого нуля.
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("совсем неожиданный отказ")
+
+    state = _web(monkeypatch, _boom)
+    assert state["web_status"].startswith("failed")
+    assert state["used_web"] is False
+
+
+def test_search_web_still_returns_a_plain_list():
+    """Тонкая обёртка обязана остаться списком: на неё смотрят прежние вызывающие."""
+    from neftegaz.tools import web as web_module
+
+    original = web_module.search_web_with_status
+    try:
+        web_module.search_web_with_status = lambda *a, **k: ([], "failed: сеть недоступна")
+        assert web_module.search_web("Brent") == []
+    finally:
+        web_module.search_web_with_status = original
+
+
+# ── когда молчат ОБА источника ─────────────────────────────────────────────
+
+
+def test_both_sources_down_says_the_answer_is_unverifiable():
+    """★Главное предложение всей правки, и произнести его может только составная.
+
+    Каждая половина говорила правду о себе, а вместе они лгали: отчётная
+    сообщала, что ответ «опирается на остальные источники», веб-овая — что
+    «только на периодические отчёты». Обе ссылались на источник, которого в этот
+    момент не было. Про то, что ответ стои́т на общих знаниях модели и проверке
+    не подлежит, не сказала бы ни одна.
+    """
+    note = prompts.sources_status_note("failed: коллекция повреждена", "failed: сеть недоступна")
+    assert "НИ ОДИН ВНЕШНИЙ ИСТОЧНИК НЕ ОТВЕТИЛ" in note
+    assert "коллекция повреждена" in note
+    assert "сеть недоступна" in note
+    # ★И ни одной ссылки на источник, которого нет.
+    assert "опирается только на остальные источники" not in note
+    assert "только на периодические отчёты" not in note
+
+
+def test_one_source_down_keeps_its_own_note():
+    """Отрицательный контроль: составная не проглатывает одиночный отказ."""
+    only_reports = prompts.sources_status_note("failed: коллекция повреждена", "")
+    assert "База отраслевых отчётов" in only_reports
+    assert "НИ ОДИН ВНЕШНИЙ ИСТОЧНИК" not in only_reports
+
+    only_web = prompts.sources_status_note("", "failed: сеть недоступна")
+    assert "Веб-поиск НЕ ВЫПОЛНЕН" in only_web
+    assert "НИ ОДИН ВНЕШНИЙ ИСТОЧНИК" not in only_web
+
+
+def test_no_note_at_all_when_both_sources_worked():
+    """Отрицательный контроль: оговорка на каждом ответе — шум, который не читают."""
+    assert prompts.sources_status_note("", "") == ""
