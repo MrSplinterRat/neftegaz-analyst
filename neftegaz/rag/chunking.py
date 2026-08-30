@@ -124,6 +124,10 @@ _VALUE_TOKEN = re.compile(r"^(?:-?[\d,]+(?:\.\d+)?|-)$")
 # от переднего края подписи, а не по всякому совпадению).
 _DASH_VALUE = re.compile(r"-(?=\s|$)")
 
+# Буквы в куске текста: признак того, что граница подписи отрезала имя, а не
+# числа. Двух подряд довольно — единичная буква бывает пометкой сноски «(a)».
+_LETTERS = re.compile(r"[A-Za-z]{2,}")
+
 # Насколько далеко назад от точек искать начало подписи.
 ROW_LABEL_WINDOW = 100
 
@@ -174,6 +178,7 @@ def table_rows(stream: str, barriers: list[tuple[int, str]] | None = None) -> li
         label_start = window_start + (numbers[-1].end() if numbers else 0)
         # Преграда, попавшая между началом подписи и точками, сдвигает начало за
         # свой конец: подпись строки не вправе включать чужой заголовок.
+        barrier_edge = 0
         place = bisect.bisect_right(starts, label_start)
         # ★Преграда бывает НАЧАТА ЛЕВЕЕ границы и накрывать её собой: последнее
         # число окна стоит внутри самого названия раздела («Industrial Production
@@ -183,8 +188,9 @@ def table_rows(stream: str, barriers: list[tuple[int, str]] | None = None) -> li
         if place and stops[place - 1][0] + len(stops[place - 1][1]) > label_start:
             place -= 1
         while place < len(stops) and starts[place] < dots.start():
-            label_start = max(label_start, stops[place][0] + len(stops[place][1]))
+            barrier_edge = max(barrier_edge, stops[place][0] + len(stops[place][1]))
             place += 1
+        label_start = max(label_start, barrier_edge)
         while label_start < dots.start() and stream[label_start] in " \t\n":
             label_start += 1
         # ★ПРОЧЕРК — ЗНАЧЕНИЕ, ХОТЯ И НЕ ЧИСЛО. На месте отсутствующих данных в
@@ -202,6 +208,62 @@ def table_rows(stream: str, barriers: list[tuple[int, str]] | None = None) -> li
         # перед ним, и проверка на «дефис-пробел» буквально его не находила.
         while _DASH_VALUE.match(stream, label_start, dots.start()):
             label_start += 1
+            while label_start < dots.start() and stream[label_start] in " \t\n":
+                label_start += 1
+        # ★ЧИСЛО БЫВАЕТ ВНУТРИ САМОЙ ПОДПИСИ, и тогда граница режет имя.
+        #
+        # «Lower 48 States (excl GOA)» превращалось в «States (excl GOA)»,
+        # «CAISO SP15 zone» — в «zone», «Real Gross Domestic Product (billion
+        # chained 2017 dollars - SAAR)» — в «dollars - SAAR)». Замер на отчёте за
+        # июль 2026: 38 строк из 938. Обрубок хуже, чем кажется: «States (excl
+        # GOA)» без «Lower 48» не находится ни одним запросом про Нижние 48 и при
+        # этом выглядит целой подписью.
+        #
+        # ★РАЗЛИЧАЕТ ВЫНОСКА, А НЕ ВИД ЧИСЛА. Законная граница — это конец
+        # значений ПРЕДЫДУЩЕЙ строки, а у всякой строки значения отделены
+        # точками-выноской. Значит, кусок слева от границы можно вернуть в
+        # подпись, если в нём есть буквы и НЕТ выноски: буквы говорят, что
+        # отрезано имя, а отсутствие выноски — что это имя не чужой строки.
+        # Нижняя граница возврата — преграда, конец предыдущей строки и край
+        # окна: дальше них подпись не принадлежит этой строке ни при каких
+        # условиях.
+        # ★ВОЗВРАТ НЕ ВПРАВЕ МЕНЯТЬ РЕШЕНИЕ «строка это или нет». Признание
+        # строкой стоит ниже и опирается на то, что между числами и точками есть
+        # подпись. Разрешив возврату дотягивать подпись, я превратил 14 не-строк
+        # в строки — счётчик вырос с 938 до 952, и все четырнадцать оказались
+        # обрубками слов вида «Refinery and blender net pr | oduction».
+        if label_start >= dots.start():
+            continue  # подписи между числами и точками нет — это не строка таблицы
+        # Пол возврата: преграда, конец предыдущей строки и край окна. Ближайшая
+        # преграда СЛЕВА от границы тоже считается — прямой просмотр её не видит,
+        # он идёт от границы вправо, и без этого раздел снова въезжал в подпись
+        # (4 случая из 938).
+        # ★ОКНО ПОИСКА — ОГРАНИЧИТЕЛЬ СКОРОСТИ, А НЕ СМЫСЛА, и полом ему быть
+        # нельзя: на странице 39 оно рубило посреди слова — «Refinery and blender
+        # net pr | oduction», — потому что предыдущая строка длинная и её
+        # значения кончаются дальше ста знаков. Пол возврата смысловой (преграда
+        # и конец предыдущей строки), а от разрастания подписи стои́т отдельный
+        # потолок вдвое шире окна.
+        floor = max(barrier_edge, spans[-1][1] if spans else 0, dots.start() - 2 * ROW_LABEL_WINDOW)
+        behind = bisect.bisect_right(starts, label_start) - 1
+        if behind >= 0:
+            floor = max(floor, stops[behind][0] + len(stops[behind][1]))
+        while label_start > floor:
+            line_start = stream.rfind("\n", 0, label_start) + 1
+            if line_start == label_start and label_start:
+                line_start = stream.rfind("\n", 0, label_start - 1) + 1
+            piece_start = max(line_start, floor)
+            piece = stream[piece_start:label_start]
+            # ★Ряд чисел в куске — это чужие значения, а не часть имени. Выноски
+            # у них может и не быть: на странице 39 предыдущая строка не
+            # распозналась строкой вовсе, и возврат перешагнул её значения,
+            # собрав подпись в 200 знаков — «on 7.41 8.21 … Natural gas». Число в
+            # имени бывает («Lower 48», «(index, 1982-1984=1.00»), но не рядом.
+            if not _LETTERS.search(piece) or _DOTS.search(piece):
+                break
+            if len(_NUMBER.findall(piece)) >= 3:
+                break
+            label_start = piece_start
             while label_start < dots.start() and stream[label_start] in " \t\n":
                 label_start += 1
         if label_start >= dots.start():

@@ -280,6 +280,76 @@ def test_a_dash_inside_the_label_is_not_trimmed():
     assert _first_row(stream).startswith("Housing Starts")
 
 
+# ── число ВНУТРИ подписи ───────────────────────────────────────────────────
+# Граница отсчитывается от последнего числа, и когда число стоит в самом имени,
+# имя режется: «Lower 48 States (excl GOA)» → «States (excl GOA)», «CAISO SP15
+# zone» → «zone». Замер на отчёте за июль 2026: 38 строк из 938. Обрубок хуже,
+# чем кажется: он не находится запросом и при этом выглядит целой подписью.
+
+_INNER_NUMBER_STREAM = (
+    "Alaska ..... 0.42 0.44 0.43 0.45\nLower 48 States (excl GOA) (c) ..... 11.2 11.4 11.5 11.6\n"
+)
+
+
+def test_a_number_inside_the_label_does_not_cut_it():
+    assert _first_row(_INNER_NUMBER_STREAM).startswith("Alaska")
+    rows = _INNER_NUMBER_STREAM
+    from neftegaz.rag.chunking import table_rows
+
+    lower = [rows[a:b] for a, b in table_rows(rows) if "Lower" in rows[a:b]]
+    assert lower, rows
+    assert lower[0].startswith("Lower 48 States"), lower[0]
+
+
+def test_the_label_never_reaches_back_over_the_previous_rows_values():
+    """★Отрицательный контроль возврата, и он несущий.
+
+    Возврат отменяет ту самую границу, которая держит строки раздельно. Без
+    условия «в куске нет ряда чисел» он перешагнул значения предыдущей строки
+    там, где та вовсе не распозналась строкой, и собрал подпись в 200 знаков:
+    «on 7.41 8.21 … Natural gas». Замер: подписей длиннее 120 знаков стало семь,
+    сейчас ноль.
+    """
+    from neftegaz.rag.chunking import table_rows
+
+    rows = _INNER_NUMBER_STREAM
+    lower = [rows[a:b] for a, b in table_rows(rows) if "Lower" in rows[a:b]][0]
+    assert "0.42" not in lower, lower
+
+
+def test_a_section_is_not_pulled_into_the_label_by_the_return():
+    """Возврат не вправе перешагнуть преграду — иначе он отменил бы починку,
+    сделанную выше по этому же файлу."""
+    stream = "Energy Production\nLower 48 States (excl GOA) ..... 11.2 11.4 11.5 11.6\n"
+    assert _first_row(stream, [(0, "Energy Production")]).startswith("Lower 48 States")
+
+
+# ── позиция раздела в тексте страницы ──────────────────────────────────────
+
+
+def test_a_section_is_located_as_a_whole_line_not_as_a_substring():
+    """★Название раздела встречается и внутри заголовка таблицы.
+
+    «Macroeconomic» стои́т в «Table 9a. U.S. Macroeconomic Indicators and CO2
+    Emissions», и поиск подстрокой ставил раздел туда — левее его настоящего
+    места. Название при этом верное, неверна позиция; зонд, печатающий название,
+    такого не показывает.
+    """
+    from neftegaz.rag.ingest import locate_blocks
+
+    text = "Table 9a. U.S. Macroeconomic Indicators and CO2 Emissions\nMacroeconomic\nReal GDP ..... 23,548 23,771\n"
+    assert locate_blocks(text, ["Macroeconomic"]) == [{"title": "Macroeconomic", "at": 58}]
+
+
+def test_the_same_section_twice_on_a_page_is_found_twice():
+    """Курсор движется: две таблицы на странице несут одноимённые разделы, и без
+    движущегося курсора оба раза находилось бы первое вхождение."""
+    from neftegaz.rag.ingest import locate_blocks
+
+    text = "Production\nA ..... 1 2 3 4\nProduction\nB ..... 5 6 7 8\n"
+    assert [block["at"] for block in locate_blocks(text, ["Production", "Production"])] == [0, 27]
+
+
 def test_without_barriers_a_two_line_label_still_joins():
     """★Отрицательный контроль: переход через строку сам по себе ЗАКОНЕН.
 

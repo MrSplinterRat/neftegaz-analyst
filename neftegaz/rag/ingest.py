@@ -25,6 +25,7 @@ from neftegaz.rag.intake import OK, inspect_pdf
 __all__ = [
     "DocumentMeta",
     "parse_filename",
+    "locate_blocks",
     "read_pdf_pages",
     "mark_unreadable_pages",
     "ingest_file",
@@ -75,6 +76,40 @@ def parse_filename(path: str) -> DocumentMeta:
         return DocumentMeta(source_name=name, date=found.group(1))
 
     return DocumentMeta(source_name=stem.replace("_", " ").strip(), date="")
+
+
+def locate_blocks(text: str, titles: list[str]) -> list[dict]:
+    """Где в тексте страницы стоят разделы таблиц: ``[{"title", "at"}, …]``.
+
+    ★РАЗДЕЛ ИЩЕТСЯ ЦЕЛОЙ СТРОКОЙ, А НЕ ПОДСТРОКОЙ. Поиск подстрокой ставил
+    «Macroeconomic» внутрь заголовка «Table 9a. U.S. Macroeconomic Indicators and
+    CO2 Emissions»: раздел оказывался левее своего настоящего места, и всё, что
+    опирается на его позицию, тихо съезжало. Заметить это по названию нельзя —
+    название верное, неверна позиция, а мой зонд печатал название
+    ([[feedback_ask_own_probe_which_field]]).
+
+    Названия ищутся ПО ПОРЯДКУ, каждое следующее — не левее предыдущего: один и
+    тот же раздел встречается на странице дважды, когда на ней две таблицы, и
+    без движущегося курсора оба раза находилось бы первое вхождение.
+
+    Раздел, не нашедшийся отдельной строкой, пропускается молча: он всё равно
+    известен потребителю из разбора, а неверная позиция хуже отсутствующей.
+    """
+    line_at: dict[str, list[int]] = {}
+    position = 0
+    for line in text.split("\n"):
+        line_at.setdefault(line.strip(), []).append(position)
+        position += len(line) + 1
+
+    blocks: list[dict] = []
+    cursor = 0
+    for title in titles:
+        at = next((place for place in line_at.get(title, ()) if place >= cursor), None)
+        if at is None:
+            continue
+        blocks.append({"title": title, "at": at})
+        cursor = at + len(title)
+    return blocks
 
 
 def read_pdf_pages(path: str) -> list[dict]:
@@ -143,15 +178,12 @@ def read_pdf_pages(path: str) -> list[dict]:
         # Позиция же переиспользует проверенный путь: раздел находится в потоке
         # так же, как заголовок таблицы, и подставляется тем же «ближайший
         # выше». Изобретать сопоставление не приходится вовсе.
-        blocks: list[dict] = []
-        cursor = 0
-        for table in page.tables:
-            for title in dict.fromkeys(row.block for row in table.rows if row.block):
-                at = text.find(title, cursor)
-                if at < 0:  # раздел не нашёлся в схлопнутом тексте — пропускаем молча
-                    continue
-                blocks.append({"title": title, "at": at})
-                cursor = at + len(title)
+        titles = [
+            title
+            for table in page.tables
+            for title in dict.fromkeys(row.block for row in table.rows if row.block)
+        ]
+        blocks = locate_blocks(text, titles)
         pages.append({"page": page.number, "text": text, "tables": tables, "blocks": blocks})
     return pages
 
