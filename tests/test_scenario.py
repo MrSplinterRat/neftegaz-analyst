@@ -160,3 +160,73 @@ def test_readable_scenario_is_not_announced(monkeypatch):
     )
     state = graph_module.node_forecast({"question": "если ОПЕК+ сократит добычу на 2 млн барр/сут"})
     assert "не прочитан" not in state["forecast_text"]
+
+
+# ── цифра горизонта — не величина сценария ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "спрогнозируй Brent на 3 месяца, если ОПЕК+ сократит добычу",
+        "спрогнозируй Brent на 30 дней, если ОПЕК+ увеличит добычу",
+        "спрогнозируй Brent на 2027 год, если ОПЕК+ сократит добычу",
+        "оцени диапазон цен на 2 квартала, если добыча упадёт",
+    ],
+)
+def test_a_horizon_digit_is_not_a_scenario_magnitude(question):
+    """★Переспрос с НЕВЕРНОЙ причиной хуже переспроса без причины.
+
+    Признаком «величина названа» служила любая цифра в вопросе, а в вопросе про
+    прогноз цифра почти всегда есть — и почти всегда это горизонт. Человек
+    читал «величина названа, но единица измерения не опознана», шёл искать у
+    себя величину и не находил её. Маршрут при этом верен, ответ вежлив, и
+    счётчик маршрутов такого не видит: 5 из 5 стои́т и с дефектом, и без него.
+    """
+    scenario = read_supply_scenario(question)
+    assert scenario.unreadable, question
+    assert "не названа величина" in scenario.note, scenario.note
+
+
+def test_a_real_magnitude_without_a_unit_is_still_reported_as_such():
+    """Отрицательный контроль: вычеркнув горизонт, нельзя ослепнуть к величине.
+
+    Правка вычёркивает цифры горизонта из счёта. Вычеркни она лишнее — разбор
+    начал бы отвечать «величины нет» и там, где величина названа, то есть
+    сменил бы одну неверную причину на другую.
+    """
+    scenario = read_supply_scenario(
+        "спрогнозируй Brent на 3 месяца, если ОПЕК+ сократит добычу на 500"
+    )
+    assert scenario.unreadable
+    assert "единица измерения не опознана" in scenario.note, scenario.note
+
+
+def test_the_two_horizon_vocabularies_do_not_drift_apart():
+    """★Словари единиц времени в двух модулях РАЗНЫЕ, и это осознанно.
+
+    В `requested_horizon_days` словарь несёт множители и живёт в слое графа; в
+    `scenario` он нужен лишь затем, чтобы не спутать срок с величиной. Общего
+    механизма у них нет — зато есть общая проверка: всё, что первый разбор
+    признаёт горизонтом, записанным цифрой, второй обязан вычеркнуть.
+
+    Именно так расхождение и обнаружится — здесь, а не в ответе пользователю.
+    """
+    import re
+
+    from neftegaz.agent.graph import requested_horizon_days
+    from neftegaz.agent.scenario import _HORIZON
+
+    phrasings = [
+        "на 3 месяца",
+        "на 30 дней",
+        "на 2027 год",
+        "на 2 квартала",
+        "на 6 недель",
+        "на 5 лет",
+        "на 90 дн",
+        "на 12 мес",
+    ]
+    for phrase in phrasings:
+        assert requested_horizon_days(phrase) is not None, phrase
+        assert not re.search(r"\d", _HORIZON.sub(" ", phrase)), phrase
