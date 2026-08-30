@@ -253,6 +253,33 @@ def test_a_barrier_that_covers_the_boundary_still_stops_it():
     assert not label.startswith(")"), label
 
 
+def test_the_label_does_not_start_with_the_previous_rows_dashes():
+    """★Прочерк — значение, хотя и не число.
+
+    На месте отсутствующих данных стои́т «-». Рядом значений он значением
+    признаётся, а при отсчёте границы подписи — нет, и хвост «- - - - -»
+    предыдущей строки уезжал в подпись следующей: «- - Congo (Brazzaville) …»
+    вместо «Congo (Brazzaville) …». Замер: 96 строк из 938, каждая десятая.
+    """
+    from neftegaz.rag.chunking import table_rows
+
+    stream = "Angola ..... 1.12 1.14 - - - -\nCongo (Brazzaville) ..... 0.26 0.27 0.25 0.24\n"
+    congo = [stream[a:b] for a, b in table_rows(stream) if "Congo" in stream[a:b]]
+    assert congo, stream
+    assert congo[0].startswith("Congo"), congo[0]
+
+
+def test_a_dash_inside_the_label_is_not_trimmed():
+    """★Отрицательный контроль: срезается только ПЕРЕДНИЙ край.
+
+    Считать всякий одиночный дефис значением нельзя — в подписи «Housing Starts
+    (millions - SAAR)» он стои́т внутри имени, и граница уехала бы на «SAAR)».
+    Починка, ломающая соседнее, дороже дефекта, который она чинит.
+    """
+    stream = "Housing Starts (millions - SAAR) ..... 1.36 1.34 1.38 1.40\n"
+    assert _first_row(stream).startswith("Housing Starts")
+
+
 def test_without_barriers_a_two_line_label_still_joins():
     """★Отрицательный контроль: переход через строку сам по себе ЗАКОНЕН.
 
