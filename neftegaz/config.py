@@ -7,7 +7,9 @@ place to look when a deployment behaves unexpectedly.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,7 +19,19 @@ load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
 
-__all__ = ["Settings", "settings", "ROOT"]
+__all__ = [
+    "Settings",
+    "settings",
+    "env_settings",
+    "ROOT",
+    "TURN_PARAMETERS",
+    "TurnParameter",
+    "turn_parameter",
+    "read_overrides",
+    "set_turn_parameter",
+    "reset_turn_parameter",
+    "overrides_path",
+]
 
 
 def _env(name: str, default: str) -> str:
@@ -123,6 +137,24 @@ class Settings:
     min_score: float = field(default_factory=lambda: _env_float("RAG_MIN_SCORE", 0.55))
     chunk_size: int = field(default_factory=lambda: _env_int("CHUNK_SIZE", 1200))
     chunk_overlap: int = field(default_factory=lambda: _env_int("CHUNK_OVERLAP", 200))
+
+    # ── Бюджет контекста ───────────────────────────────────────────────────
+    # Сколько знаков собирающая сторона готова отдать каждому виду источника.
+    # ★Потолок держит СОБИРАЮЩИЙ, а не модель: сколько окна ни дай, число
+    # найденного умножается на длину найденного, и обе величины растут от
+    # настроек поиска. Однажды это уже кончилось ответом-свалкой на
+    # 500 context_length_exceeded.
+    #
+    # Числа стояли константами в `neftegaz/agent/graph.py` — то есть снаружи
+    # системы их не было видно вовсе, хотя именно они отвечают на вопрос
+    # «почему модель не увидела найденный фрагмент».
+    report_budget_chars: int = field(
+        default_factory=lambda: _env_int("REPORT_BUDGET_CHARS", 7000)
+    )
+    web_budget_chars: int = field(default_factory=lambda: _env_int("WEB_BUDGET_CHARS", 4000))
+    # Потолок на ОДИН фрагмент: без него один длинный фрагмент съедает бюджет
+    # целиком и вытесняет остальные.
+    fragment_cap_chars: int = field(default_factory=lambda: _env_int("FRAGMENT_CAP_CHARS", 1800))
 
     # ── Web search ─────────────────────────────────────────────────────────
     web_results: int = field(default_factory=lambda: _env_int("WEB_RESULTS", 5))
@@ -268,3 +300,235 @@ class Settings:
 
 
 settings = Settings()
+# Снимок того, что говорят `.env` и умолчания, — БЕЗ правок из интерфейса.
+# ★Нужен затем, чтобы правка из интерфейса не превращалась в тихое расхождение:
+# человек, который открыл `.env` и прочёл `RAG_TOP_K=5`, обязан узнать в панели,
+# что в работе сейчас другое число, а не гадать, почему система ведёт себя иначе,
+# чем написано в её конфигурации.
+env_settings = Settings()
+
+
+# ── параметры хода, правимые из интерфейса ─────────────────────────────────
+#
+# ★СПИСОК ЗАКРЫТЫЙ, И В ЭТОМ ВЕСЬ СМЫСЛ. Настройки системы делятся по тому, что
+# они ломают: параметры ХОДА действуют со следующего вопроса и не трогают
+# ничего, кроме него; параметры КОРПУСА (модель эмбеддингов, размер фрагмента,
+# коллекция) делают уже собранный индекс несогласованным с настройкой. Первые
+# можно править из интерфейса безопасно, вторые — нельзя, и разделение обязано
+# быть не советом в документации, а списком в коде: то, чего здесь нет, из
+# интерфейса не правится вовсе.
+
+
+@dataclass(frozen=True)
+class TurnParameter:
+    """Одна правимая настройка: имя поля, имя в `.env` и границы допустимого."""
+
+    field: str
+    env: str
+    label: str
+    kind: str  # "int" | "float" | "text"
+    low: float | None = None
+    high: float | None = None
+    pattern: str | None = None
+    note: str = ""
+
+    def parse(self, raw):
+        """Разобрать введённое значение или отказать с внятной причиной.
+
+        ★Отказ громкий, а не тихий откат к прежнему. Опечатка, молча
+        превращённая в умолчание, выглядит как исправная система, которая
+        почему-то делает не то.
+        """
+        if self.kind == "text":
+            value = str(raw).strip()
+            if self.pattern and not re.fullmatch(self.pattern, value):
+                raise ValueError(f"{self.label}: значение {value!r} не подходит по форме")
+            return value
+        try:
+            value = int(raw) if self.kind == "int" else float(raw)
+        except (TypeError, ValueError) as exc:
+            expected = "целым числом" if self.kind == "int" else "числом"
+            raise ValueError(f"{self.label}: значение должно быть {expected}, а не {raw!r}") from exc
+        if self.low is not None and value < self.low:
+            raise ValueError(f"{self.label}: значение {value} меньше допустимого {self.low}")
+        if self.high is not None and value > self.high:
+            raise ValueError(f"{self.label}: значение {value} больше допустимого {self.high}")
+        return value
+
+
+TURN_PARAMETERS: tuple[TurnParameter, ...] = (
+    TurnParameter(
+        "llm_temperature",
+        "LLM_TEMPERATURE",
+        "температура модели",
+        "float",
+        low=-1.0,
+        high=2.0,
+        note="−1 означает «не передавать параметр серверу вовсе»",
+    ),
+    TurnParameter("llm_timeout", "LLM_TIMEOUT", "таймаут модели, с", "int", low=5, high=3600),
+    TurnParameter("top_k", "RAG_TOP_K", "фрагментов из отчётов", "int", low=1, high=50),
+    TurnParameter(
+        "min_score",
+        "RAG_MIN_SCORE",
+        "порог близости",
+        "float",
+        low=0.0,
+        high=1.0,
+        note="ниже порога находка считается непокрытой корпусом и включает веб-поиск",
+    ),
+    TurnParameter(
+        "report_budget_chars",
+        "REPORT_BUDGET_CHARS",
+        "бюджет отчётов, знаков",
+        "int",
+        low=500,
+        high=100_000,
+    ),
+    TurnParameter(
+        "web_budget_chars", "WEB_BUDGET_CHARS", "бюджет веба, знаков", "int", low=0, high=100_000
+    ),
+    TurnParameter(
+        "fragment_cap_chars",
+        "FRAGMENT_CAP_CHARS",
+        "потолок одного фрагмента, знаков",
+        "int",
+        low=200,
+        high=50_000,
+    ),
+    TurnParameter(
+        "history_budget_chars",
+        "HISTORY_BUDGET_CHARS",
+        "бюджет истории, знаков",
+        "int",
+        low=0,
+        high=100_000,
+    ),
+    TurnParameter(
+        "history_turn_cap_chars",
+        "HISTORY_TURN_CAP_CHARS",
+        "потолок одного хода истории, знаков",
+        "int",
+        low=100,
+        high=50_000,
+    ),
+    TurnParameter("web_results", "WEB_RESULTS", "веб-результатов", "int", low=1, high=50),
+    TurnParameter(
+        "web_region",
+        "WEB_REGION",
+        "регион веб-поиска",
+        "text",
+        pattern=r"[a-z]{2}-[a-z]{2}",
+        note="две буквы языка и две буквы страны, например ru-ru",
+    ),
+)
+
+_BY_NAME = {parameter.field: parameter for parameter in TURN_PARAMETERS}
+
+
+def turn_parameter(name: str) -> TurnParameter:
+    if name not in _BY_NAME:
+        raise KeyError(
+            f"{name!r} не входит в число правимых из интерфейса параметров хода; "
+            f"правимые: {', '.join(sorted(_BY_NAME))}"
+        )
+    return _BY_NAME[name]
+
+
+def overrides_path() -> Path:
+    """Файл, в котором живут правки из интерфейса.
+
+    ★Отдельный файл, а не `.env`. В `.env` лежат секреты и комментарии, его
+    ведёт тот, кто разворачивает систему, и переписывать его из интерфейса
+    значило бы стирать чужую работу и рисковать ключами. Правки интерфейса —
+    это состояние приложения, а не его конфигурация, и живут они там же, где
+    остальное состояние: в `data/`.
+    """
+    return Path(_env("SETTINGS_OVERRIDES", str(ROOT / "data" / "settings-overrides.json")))
+
+
+def read_overrides() -> dict:
+    """Сохранённые правки. Битый файл — не повод падать при старте, но и не тишина."""
+    path = overrides_path()
+    if not path.is_file():
+        return {}
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"⚠ {path}: файл правок не прочитан ({exc}); работаю по .env", flush=True)
+        return {}
+    if not isinstance(stored, dict):
+        print(f"⚠ {path}: ожидался объект, а лежит {type(stored).__name__}; работаю по .env")
+        return {}
+    return stored
+
+
+def _write_overrides(values: dict) -> None:
+    path = overrides_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(values, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _apply(name: str, value) -> None:
+    # Settings заморожен намеренно: случайная правка настройки посреди работы —
+    # источник неповторимых отказов. Здесь правка не случайная: имя проверено по
+    # закрытому списку, значение разобрано и введено в границы.
+    object.__setattr__(settings, name, value)
+
+
+def set_turn_parameter(name: str, raw) -> object:
+    """Изменить параметр хода: проверить, применить в этом процессе и сохранить.
+
+    Порядок именно такой. Сначала разбор — иначе на диск уедет мусор. Потом
+    правка живого объекта — чтобы следующий же вопрос считался по новому
+    значению. И только потом запись, потому что переживание перезапуска
+    ПРОЦЕССА и есть смысл этой возможности: настройка, забытая при перезапуске,
+    называется не настройкой, а прихотью текущей вкладки.
+    """
+    parameter = turn_parameter(name)
+    value = parameter.parse(raw)
+    # ★ПРАВКА, СОВПАДАЮЩАЯ С `.env`, — НЕ ПРАВКА. Сохранить её значило бы
+    # показывать расхождение там, где его нет: «сейчас 5, а .env говорит 5».
+    # Поймано приёмкой в браузере, случайно — и оказалось настоящим дефектом:
+    # предупреждение, которое загорается без повода, обесценивает себя ровно
+    # тогда, когда повод появится.
+    if value == getattr(env_settings, parameter.field):
+        return reset_turn_parameter(name)
+    _apply(name, value)
+    stored = read_overrides()
+    stored[name] = value
+    _write_overrides(stored)
+    return value
+
+
+def reset_turn_parameter(name: str) -> object:
+    """Вернуть параметру то значение, которое даёт `.env`, и забыть правку."""
+    parameter = turn_parameter(name)
+    value = getattr(env_settings, parameter.field)
+    _apply(name, value)
+    stored = read_overrides()
+    stored.pop(name, None)
+    _write_overrides(stored)
+    return value
+
+
+def _load_saved_overrides() -> None:
+    """Поднять сохранённые правки при старте процесса.
+
+    ★Непригодная правка не применяется и НЕ МОЛЧИТ. Пропустить её тихо значило
+    бы, что человек видит в панели одно значение, а система работает по
+    другому, — ровно то расхождение, против которого вся эта ветка и сделана.
+    """
+    for name, raw in read_overrides().items():
+        if name not in _BY_NAME:
+            print(f"⚠ правка {name!r} пропущена: такого параметра хода нет", flush=True)
+            continue
+        try:
+            _apply(name, _BY_NAME[name].parse(raw))
+        except ValueError as exc:
+            print(f"⚠ правка {name!r} пропущена: {exc}", flush=True)
+
+
+_load_saved_overrides()

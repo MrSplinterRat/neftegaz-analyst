@@ -1483,10 +1483,14 @@ def test_context_fits_the_budget_and_says_when_it_was_cut():
     метки не ставим; заведомо больше бюджета — режем и метку ставим.
     """
     from neftegaz.agent.graph import (
-        REPORT_BUDGET_CHARS,
         TRUNCATION_MARK,
         _format_report_context,
     )
+    from neftegaz.config import settings
+
+    # Бюджет читается из настроек: он стал правимым параметром хода, и тест
+    # обязан спрашивать действующее значение, а не помнить прежнюю константу.
+    report_budget_chars = settings.report_budget_chars
 
     class FakeHit:
         def __init__(self, text, index):
@@ -1500,13 +1504,13 @@ def test_context_fits_the_budget_and_says_when_it_was_cut():
 
     small = [FakeHit("Brent Spot Average 75.83 68.01\n" * 4, i) for i in range(3)]
     rendered = _format_report_context(small)
-    assert len(rendered) <= REPORT_BUDGET_CHARS
+    assert len(rendered) <= report_budget_chars
     assert TRUNCATION_MARK not in rendered
     assert rendered.count("[фрагмент:") == 3, "короткие фрагменты обрезать не за что"
 
     huge = [FakeHit("x" * 4000, i) for i in range(8)]
     rendered = _format_report_context(huge)
-    assert len(rendered) <= REPORT_BUDGET_CHARS + len(TRUNCATION_MARK) * 8
+    assert len(rendered) <= report_budget_chars + len(TRUNCATION_MARK) * 8
     assert TRUNCATION_MARK in rendered, "усечение обязано быть видно модели"
     assert rendered.count("[фрагмент:") < 8, "часть фрагментов обязана отсеяться"
     # ★Пустого контекста быть не должно ни при каком бюджете: он превратил бы

@@ -36,6 +36,7 @@ from neftegaz.agent.threads import (  # noqa: E402
     get_registry,
     registry_unavailable_reason,
 )
+from neftegaz import config  # noqa: E402
 from neftegaz.config import settings  # noqa: E402
 from neftegaz.tools.web import checked_backend  # noqa: E402
 
@@ -429,6 +430,87 @@ def panel_search() -> None:
             st.rerun()
 
 
+def _shown(parameter, value) -> str:
+    """Значение так, как его читает человек, а не так, как хранит код."""
+    # ★«температура −1.0» — мёртвое число: отрицательной температуры не бывает,
+    # это наш признак «не передавать параметр серверу вовсе» (нужен моделям,
+    # которые отвергают запрос с температурой целиком). Печатать его числом
+    # значит требовать от читателя знания нашего кода.
+    if parameter.field == "llm_temperature" and value < 0:
+        return "не передаётся серверу"
+    return str(value)
+
+
+def turn_parameters_form() -> None:
+    """Параметры хода — показать, дать поправить и сказать, что говорит `.env`.
+
+    ★ПРАВКА ЖИВЁТ ДОЛЬШЕ ВКЛАДКИ. Значение уходит в файл рядом с остальным
+    состоянием и поднимается при следующем старте процесса: настройка, забытая
+    при перезапуске, называется не настройкой, а прихотью текущей вкладки.
+
+    ★РАСХОЖДЕНИЕ С `.env` НАЗЫВАЕТСЯ ВСЛУХ. Человек, который открыл `.env` и
+    прочёл там `RAG_TOP_K=5`, обязан увидеть здесь, что в работе сейчас другое
+    число, — иначе правка из интерфейса становится тихим расхождением между
+    конфигурацией и поведением, и отладка начинается с ложной посылки.
+
+    ★ПРАВЯТСЯ ТОЛЬКО ПАРАМЕТРЫ ХОДА. Список закрыт в `neftegaz/config.py`:
+    параметры корпуса (модель эмбеддингов, размер фрагмента, коллекция) сюда не
+    попадают по устройству, потому что их правка делает уже собранный индекс
+    несогласованным с настройкой — а это не «другой ответ», это другой продукт.
+    """
+    st.markdown("**Параметры хода** — действуют со следующего вопроса, ничего не ломают")
+    overrides = config.read_overrides()
+    if overrides:
+        st.caption(
+            f"Изменено из интерфейса: {len(overrides)} из {len(config.TURN_PARAMETERS)}. "
+            "Правки лежат в `data/settings-overrides.json` и переживают перезапуск."
+        )
+
+    for parameter in config.TURN_PARAMETERS:
+        current = getattr(settings, parameter.field)
+        from_env = getattr(config.env_settings, parameter.field)
+        changed = parameter.field in overrides
+
+        st.markdown(f"{parameter.label} — `{parameter.env}`")
+        left, right = st.columns([3, 1])
+        # ★КЛЮЧ ВИДЖЕТА НЕСЁТ ДЕЙСТВУЮЩЕЕ ЗНАЧЕНИЕ, и это не украшение.
+        # Streamlit держит состояние поля по ключу и считает его сильнее
+        # переданного `value`. При постоянном ключе поле показывало бы
+        # набранное, а не принятое: после возврата к `.env` в нём оставалась
+        # отменённая правка — то есть панель врала бы о работающей настройке.
+        # Поймано приёмкой: файл правок опустел, подпись о расхождении ушла, а
+        # в поле по-прежнему стояло 3 вместо 5. Удаление ключа из session_state
+        # не помогает: виджет к этому времени уже создан в текущем прогоне.
+        # Смена ключа создаёт НОВОЕ поле, и оно берёт значение из настроек.
+        field_key = f"turn_{parameter.field}@{current}"
+        typed = left.text_input(
+            parameter.label,
+            value=str(current),
+            key=field_key,
+            label_visibility="collapsed",
+            help=parameter.note or None,
+        )
+        if right.button("Применить", key=f"turn_apply_{parameter.field}"):
+            try:
+                config.set_turn_parameter(parameter.field, typed)
+            except ValueError as exc:
+                # Отказ громкий и с причиной: тихий откат к прежнему значению
+                # выглядел бы как исправная система, которая почему-то делает
+                # не то.
+                st.error(str(exc))
+            else:
+                st.rerun()
+
+        if changed:
+            st.caption(
+                f"⚠ изменено из интерфейса: сейчас `{_shown(parameter, current)}`, "
+                f"а `.env` говорит `{_shown(parameter, from_env)}`."
+            )
+            if st.button("Вернуть значение из .env", key=f"turn_reset_{parameter.field}"):
+                config.reset_turn_parameter(parameter.field)
+                st.rerun()
+
+
 def panel_settings() -> None:
     """Настройки, разложенные по тому, ЧТО ИМЕННО они портят.
 
@@ -472,25 +554,7 @@ def panel_settings() -> None:
         st.caption("Задайте вопрос — здесь появится, чем именно был заполнен контекст.")
 
     st.markdown("---")
-    st.markdown("**Параметры хода** — действуют со следующего вопроса, ничего не ломают")
-    # ★«температура -1.0» — мёртвое число: отрицательного значения у температуры
-    # не бывает, это наш признак «не передавать параметр серверу вовсе» (нужен
-    # моделям, которые отвергают запрос с температурой целиком). Показывать его
-    # как число значит требовать от читателя знания нашего кода.
-    temperature = (
-        "не передаётся серверу (модель отвергает этот параметр)"
-        if settings.llm_temperature < 0
-        else f"`{settings.llm_temperature}`"
-    )
-    st.markdown(
-        f"- температура модели {temperature}, "
-        f"таймаут `{settings.llm_timeout}` с\n"
-        f"- фрагментов из отчётов `RAG_TOP_K = {settings.top_k}`, "
-        f"порог близости `RAG_MIN_SCORE = {settings.min_score}`\n"
-        f"- веб-результатов `{settings.web_results}`, регион `{settings.web_region}`\n"
-        f"- бюджет истории `{settings.history_budget_chars}` знаков, "
-        f"ход обрезается до `{settings.history_turn_cap_chars}`"
-    )
+    turn_parameters_form()
 
     st.markdown("**Параметры разговора** — живут при нити, а не глобально")
     st.markdown(

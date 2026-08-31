@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from neftegaz.agent.graph import (
-    FRAGMENT_CAP_CHARS,
     _format_report_context,
     fed_report_hits,
 )
+from neftegaz.config import settings
 
 
 @dataclass(frozen=True)
@@ -31,12 +31,12 @@ def test_every_hit_that_fits_is_reported_as_fed():
 def _overflowing_hits(count: int = 5) -> list[FakeHit]:
     """Фрагменты, которых заведомо больше, чем влезает в бюджет.
 
-    ⚠Длину задаёт не бюджет, а `FRAGMENT_CAP_CHARS`: каждый фрагмент сперва
+    ⚠Длину задаёт не бюджет, а `settings.fragment_cap_chars`: каждый фрагмент сперва
     режется до 1800 знаков, и «половина бюджета» на входе превращается в 1800
     на выходе. Первая версия этого теста считала по бюджету и ошиблась именно
     здесь — три «огромных» фрагмента спокойно влезали втроём.
     """
-    big = "я" * (FRAGMENT_CAP_CHARS * 2)
+    big = "я" * (settings.fragment_cap_chars * 2)
     return [FakeHit(big, f"id{i}") for i in range(count)]
 
 

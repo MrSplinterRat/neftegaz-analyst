@@ -308,9 +308,12 @@ def parse_supply_change(question: str) -> float:
 # Урезается ХВОСТ, потому что попадания приходят по убыванию близости:
 # первым выпадает наименее подходящее. Обрезанный фрагмент помечается явно —
 # модель должна отличать «в отчёте этого нет» от «сюда не поместилось».
-REPORT_BUDGET_CHARS = 7000
-WEB_BUDGET_CHARS = 4000
-FRAGMENT_CAP_CHARS = 1800
+# ★Сами числа переехали в настройки (`settings.report_budget_chars` и соседи).
+# Константой в этом модуле они были не видны снаружи вовсе: чтобы узнать, почему
+# найденный фрагмент не доехал до модели, приходилось читать код. Теперь они
+# показаны в панели и правятся оттуда — как параметры ХОДА, то есть безопасно и
+# со следующего вопроса. Читаются при каждом обращении, а не разово при импорте:
+# иначе правка из интерфейса подействовала бы только после перезапуска.
 TRUNCATION_MARK = "\n[…фрагмент обрезан по бюджету контекста]"
 
 
@@ -331,7 +334,8 @@ def _fit(blocks: list[str], budget: int) -> list[str]:
 
 
 def _clip(text: str) -> str:
-    return text if len(text) <= FRAGMENT_CAP_CHARS else text[:FRAGMENT_CAP_CHARS] + TRUNCATION_MARK
+    cap = settings.fragment_cap_chars
+    return text if len(text) <= cap else text[:cap] + TRUNCATION_MARK
 
 
 def format_history(turns: list[dict]) -> str:
@@ -435,7 +439,7 @@ def _report_blocks(hits: list[Any]) -> list[str]:
 
 def _format_report_context(hits: list[Any]) -> str:
     """Render retrieved chunks with the metadata the citation format needs."""
-    return "\n\n".join(_fit(_report_blocks(hits), REPORT_BUDGET_CHARS))
+    return "\n\n".join(_fit(_report_blocks(hits), settings.report_budget_chars))
 
 
 def fed_report_hits(hits: list[Any]) -> list[Any]:
@@ -449,7 +453,7 @@ def fed_report_hits(hits: list[Any]) -> list[Any]:
     оставляет ПРЕФИКС списка (см. `_fit`), поэтому пара «фрагмент ↔ уцелевший
     блок» получается сопоставлением по порядку.
     """
-    kept = _fit(_report_blocks(hits), REPORT_BUDGET_CHARS)
+    kept = _fit(_report_blocks(hits), settings.report_budget_chars)
     return [hit for hit, _ in zip(hits, kept, strict=False)]
 
 
@@ -458,7 +462,7 @@ def _format_web_context(hits: list[Any]) -> str:
     for hit in hits:
         mark = " (отраслевой/агентский источник)" if hit.preferred else ""
         blocks.append(f"[веб: {hit.title} — {hit.domain}{mark}]\n{_clip(hit.snippet)}\n{hit.url}")
-    return "\n\n".join(_fit(blocks, WEB_BUDGET_CHARS))
+    return "\n\n".join(_fit(blocks, settings.web_budget_chars))
 
 
 # ── nodes ──────────────────────────────────────────────────────────────────
@@ -818,8 +822,8 @@ def node_answer(state: AgentState) -> AgentState:
             "history": len(history_context),
             "web": len(web_context),
             "forecast": len(forecast_text),
-            "reports_budget": REPORT_BUDGET_CHARS,
-            "web_budget": WEB_BUDGET_CHARS,
+            "reports_budget": settings.report_budget_chars,
+            "web_budget": settings.web_budget_chars,
             "history_budget": settings.history_budget_chars,
             "fragments_found": len(hits),
             "fragments_fed": len(fed_chunk_ids),
