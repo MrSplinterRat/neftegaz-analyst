@@ -200,3 +200,53 @@ def test_a_correct_value_still_starts():
         timeout=120,
     )
     assert "ПОДНЯЛОСЬ" in done.stdout, done.stderr
+
+
+# ── бюджеты контекста против окна модели: предупреждение, а не отказ ───────
+
+
+def test_budgets_too_large_for_the_declared_window_are_warned_about():
+    """★Бюджеты заданы в ЗНАКАХ, окно модели меряется в ТОКЕНАХ.
+
+    Отношение между ними зависит от языка: замер на нашем материале дал 2.48
+    знака на токен по английским таблицам STEO и 2.02 по русским ответам. Сумма
+    бюджетов в 15 000 знаков — это 6000–7400 токенов только контекста, и при
+    окне 8k сервер модели отвечает отказом посреди работы.
+    """
+    tight = dataclasses.replace(config.settings, llm_context_tokens=8192)
+    warning = config.context_budget_warning(tight)
+    assert warning is not None, "тесное окно не вызвало предупреждения"
+    assert "8192" in warning
+    assert "REPORT_BUDGET_CHARS" in warning, "предупреждение не говорит, что именно править"
+
+
+def test_a_roomy_window_produces_no_warning():
+    """★Отрицательный контроль: предупреждение, звучащее всегда, не слышат."""
+    roomy = dataclasses.replace(config.settings, llm_context_tokens=32768)
+    assert config.context_budget_warning(roomy) is None
+
+
+def test_an_unknown_window_is_not_guessed():
+    """0 значит «окно неизвестно». Выдумать его за пользователя хуже, чем молчать."""
+    unknown = dataclasses.replace(config.settings, llm_context_tokens=0)
+    assert config.context_budget_warning(unknown) is None
+
+
+def test_the_warning_does_not_stop_the_start():
+    """★Это ПРЕДУПРЕЖДЕНИЕ, а не отказ, и разница принципиальная.
+
+    Перевод знаков в токены оценочный: считает его токенизатор чужого семейства,
+    а модель настраивается и может быть любой. Уронить старт на такой оценке
+    значило бы поменять один тихий отказ на другой, громкий и часто ложный.
+    """
+    environment = {**os.environ, "LLM_CONTEXT_TOKENS": "8192"}
+    done = subprocess.run(
+        [sys.executable, "-c", "import neftegaz.config; print('ПОДНЯЛОСЬ')"],
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
+        env=environment,
+        timeout=120,
+    )
+    assert "ПОДНЯЛОСЬ" in done.stdout, done.stderr
+    assert "превышена длина контекста" in done.stdout, "предупреждение не напечатано при старте"

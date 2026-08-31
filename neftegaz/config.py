@@ -96,6 +96,19 @@ class Settings:
     # (400 invalid_request_error: `temperature` is deprecated for this model).
     llm_temperature: float = field(default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.1))
     llm_timeout: int = field(default_factory=lambda: _env_int("LLM_TIMEOUT", 300))
+    # Окно контекста подключённой модели, в токенах. 0 — «не знаем», и тогда
+    # сверка бюджетов не проводится: выдумывать окно за пользователя хуже, чем
+    # молчать.
+    #
+    # ★ЗАЧЕМ ЭТО ЗДЕСЬ. Бюджеты контекста заданы в ЗНАКАХ, а окно модели меряется
+    # в ТОКЕНАХ, и переводной коэффициент зависит от языка: замер на нашем
+    # материале дал 2.48 знака на токен по английским таблицам STEO и 2.02 по
+    # русским ответам системы (tiktoken, cl100k_base). То есть сумма бюджетов в
+    # 15 000 знаков — это примерно 6000–7400 токенов ТОЛЬКО контекста, без
+    # задания и без ответа. При окне 8k этого впритык, а узнаётся такое отказом
+    # сервера посреди работы: ровно так система однажды и выродилась в свалку
+    # сырых фрагментов.
+    llm_context_tokens: int = field(default_factory=lambda: _env_int("LLM_CONTEXT_TOKENS", 0))
 
     # ── Embeddings ─────────────────────────────────────────────────────────
     # Local by default: the report corpus must not leave the machine, and a
@@ -422,6 +435,15 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         "llm_timeout", "LLM_TIMEOUT", "таймаут модели, с", "int", low=5, high=3600, editable=True
     ),
     SettingSpec(
+        "llm_context_tokens",
+        "LLM_CONTEXT_TOKENS",
+        "окно контекста модели, токенов",
+        "int",
+        low=0,
+        high=10_000_000,
+        note="0 означает «окно неизвестно», и тогда бюджеты не сверяются с ним",
+    ),
+    SettingSpec(
         "top_k", "RAG_TOP_K", "фрагментов из отчётов", "int", low=1, high=50, editable=True
     ),
     SettingSpec(
@@ -676,6 +698,44 @@ def check_settings(values: Settings) -> list[str]:
     return problems
 
 
+# ★ЧИСЛА ПЕРЕВОДА ВЗЯТЫ ИЗ ЗАМЕРА, А НЕ ИЗ ГОЛОВЫ. На нашем материале
+# (tiktoken, cl100k_base): 2.48 знака на токен по английским таблицам STEO,
+# 2.02 по русским ответам системы. Берётся ХУДШИЙ конец: недооценка числа
+# токенов — это ровно тот отказ, который мы предупреждаем.
+# ⚠Оценка грубая по устройству: считает её токенизатор семейства OpenAI, а
+# модель настраивается и может быть любой (Р-004). Поэтому результат — ПОВОД
+# ПОСМОТРЕТЬ, а не отказ: ронять старт на чужом токенизаторе нельзя.
+CHARS_PER_TOKEN = 2.0
+# Запас на само задание и на ответ модели: контекстом окно не исчерпывается.
+# Ответы демонстрационных сценариев — 1500–2500 знаков, то есть около тысячи
+# токенов; задание с ролью и правилами — примерно столько же.
+TOKENS_RESERVED_FOR_PROMPT_AND_ANSWER = 1536
+
+
+def context_budget_warning(values: Settings) -> str | None:
+    """Предупредить, если бюджеты контекста не помещаются в окно модели.
+
+    Возвращает текст предупреждения или ``None``. ★Именно предупреждение, а не
+    отказ: окно объявляет человек, перевод знаков в токены оценочный, и падать
+    при старте из-за грубой оценки значило бы менять один тихий отказ на другой,
+    громкий и часто ложный.
+    """
+    if values.llm_context_tokens <= 0:
+        return None
+    chars = values.report_budget_chars + values.web_budget_chars + values.history_budget_chars
+    needed = int(chars / CHARS_PER_TOKEN) + TOKENS_RESERVED_FOR_PROMPT_AND_ANSWER
+    if needed <= values.llm_context_tokens:
+        return None
+    return (
+        f"⚠ бюджеты контекста ({chars} знаков) при худшем измеренном отношении "
+        f"{CHARS_PER_TOKEN} знака на токен дают около {needed} токенов вместе с заданием и "
+        f"ответом, а LLM_CONTEXT_TOKENS={values.llm_context_tokens}. Сервер модели ответит "
+        "отказом «превышена длина контекста», и ответ выродится в свалку фрагментов. "
+        "Уменьшите REPORT_BUDGET_CHARS / WEB_BUDGET_CHARS / HISTORY_BUDGET_CHARS "
+        "или укажите настоящее окно модели."
+    )
+
+
 def _check_at_start(values: Settings) -> None:
     """Отказаться работать на непригодной настройке — при старте, а не потом.
 
@@ -806,3 +866,8 @@ _load_saved_overrides()
 # раньше всего остального: ни один вопрос не будет отвечен по настройке, о
 # которой мы знаем, что она непригодна.
 _check_at_start(settings)
+
+# Предупреждение (а не отказ) о бюджетах, не помещающихся в объявленное окно.
+_warning = context_budget_warning(settings)
+if _warning:
+    print(_warning, flush=True)
