@@ -37,6 +37,7 @@ from neftegaz.agent.threads import (  # noqa: E402
     registry_unavailable_reason,
 )
 from neftegaz.config import settings  # noqa: E402
+from neftegaz.tools.web import checked_backend  # noqa: E402
 
 st.set_page_config(
     page_title="Нефтегазовый аналитик",
@@ -512,11 +513,17 @@ def panel_settings() -> None:
         "должен быть виден, а не выясняться сниффером. Адреса и ключи здесь не "
         "показываются — только состояние."
     )
+    # ★Поисковый сервис называется поимённо, потому что именно туда уезжает
+    # текст вопроса пользователя. Строка «веб-поиск включён» без имени адресата
+    # выглядит как честная опись и ею не является.
+    backend, backend_why = checked_backend()
+    web_backend = f"веб-поиск: {backend}" if backend else "веб-поиск: настройка неверна"
+    web_state = "включено" if backend else f"выключено — {backend_why[:80]}"
     st.markdown(
         f"| куда | зачем | когда | состояние |\n|---|---|---|---|\n"
         f"| языковая модель | сам ответ | каждый вопрос | "
         f"{'локальная' if '127.0.0.1' in settings.llm_base_url else 'внешний endpoint'} |\n"
-        f"| DuckDuckGo (ddgs) | веб-поиск | когда отчётов не хватило | включено |\n"
+        f"| {web_backend} | веб-поиск | когда отчётов не хватило | {web_state} |\n"
         f"| Yahoo Finance (yfinance) | история цен Brent | обновление котировок | "
         f"по запуску скрипта |\n"
         f"| HuggingFace (fastembed) | модель эмбеддингов, 241 МБ | первый запуск | "
