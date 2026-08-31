@@ -12,6 +12,7 @@ suite runs on a clean checkout.
 
 from __future__ import annotations
 
+import glob
 import os
 
 import pytest
@@ -168,7 +169,20 @@ def test_two_runs_over_the_same_bytes_give_the_same_report(tmp_path):
 # ── корпус ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.skipif(not os.path.isdir(REPORTS_DIR), reason="корпус не выложен")
+# ★Условие пропуска смотрит на PDF, а не на каталог, и это исправление, а не
+# придирка. Каталог `data/reports` существует ВСЕГДА: в git лежит `.gitkeep`,
+# а сам корпус (сотни мегабайт отчётов) не трекается и приезжает отдельно.
+# Условие «каталог есть» поэтому истинно и там, где корпуса нет, — и тест падал
+# с «в data/reports нет PDF» в любой свежей копии дерева. То есть ОТСУТСТВИЕ
+# ДАННЫХ выдавало себя за ПОРЧУ КОРПУСА: ровно тот класс, который этот файл и
+# стережёт, только повёрнутый на саму приёмку. Проверено прогоном на отдельной
+# рабочей копии той же вершины: 565 тестов зелены, красен один этот.
+_SHIPPED_PDFS = sorted(glob.glob(os.path.join(REPORTS_DIR, "*.pdf")))
+
+
+@pytest.mark.skipif(
+    not _SHIPPED_PDFS, reason="корпус не выложен: в data/reports нет ни одного PDF"
+)
 def test_shipped_corpus_is_readable_and_its_caveats_are_named():
     """Our own corpus passes — but not silently: the font caveat must be stated.
 
@@ -178,7 +192,10 @@ def test_shipped_corpus_is_readable_and_its_caveats_are_named():
     выглядеть чище, чем корпус.
     """
     reports = inspect_directory(REPORTS_DIR)
-    assert reports, "в data/reports нет PDF"
+    # Пустая выдача здесь уже НЕ означает «корпуса нет» — до этой строки мы
+    # дошли только потому, что PDF в каталоге найдены. Значит их не вернул
+    # обходчик, и это его отказ.
+    assert reports, f"обходчик не вернул ни одного из {len(_SHIPPED_PDFS)} PDF в {REPORTS_DIR}"
     for report in reports:
         assert report.readable, report.summary()
         assert report.severity in (OK, NOTICE)
