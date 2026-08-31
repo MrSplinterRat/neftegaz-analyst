@@ -21,6 +21,7 @@ from neftegaz.agent import prompts
 from neftegaz.agent.llm import ask
 from neftegaz.agent.scenario import read_supply_scenario
 from neftegaz.config import settings
+from neftegaz.tools import citations
 
 __all__ = [
     "AgentState",
@@ -121,6 +122,12 @@ class AgentState(TypedDict, total=False):
     # польза повторного использования — в НАЙДЕННОМ, а процитированное и так
     # стои́т в ответе. Едут ТОЛЬКО идентификаторы, никогда не текст ответа.
     fed_chunk_ids: list[str]
+    # Замер разметки ступеней в тексте ответа: {"citations": …, "marked": …,
+    # "unmatched": …}. Нужен затем, что «пометка появляется только на спорных
+    # фрагментах» — утверждение проверяемое, и проверять его надо числом.
+    # ★`unmatched` — ссылка на страницу, которой в контексте не было: отдельный
+    # и худший отказ, чем спорная страница, и он обязан считаться отдельно.
+    confidence_marks: dict
     # Чем на самом деле был заполнен контекст последнего хода, в знаках:
     # {"reports": …, "history": …, "web": …, "forecast": …, "budget": …}.
     # ★Настройка без показанного эффекта — мёртвое число: «бюджет 8000» ничего
@@ -744,9 +751,10 @@ def node_answer(state: AgentState) -> AgentState:
     # ★След находок рождается ЗДЕСЬ, где решается, что попадёт в контекст, а не
     # пересчитывается снаружи по тем же правилам: счётчик, стоящий не там, где
     # принимается решение, считает не то, что решено.
+    fed_hits = fed_report_hits(hits)
     fed_chunk_ids = [
         identifier
-        for identifier in (getattr(hit, "chunk_id", "") for hit in fed_report_hits(hits))
+        for identifier in (getattr(hit, "chunk_id", "") for hit in fed_hits)
         if identifier
     ]
     report_context = _format_report_context(hits)
@@ -790,6 +798,11 @@ def node_answer(state: AgentState) -> AgentState:
     # Сказанное модели доходит до человека только пересказом, а пересказчик
     # вправе счесть оговорку неважной и потерять её. То, каким источником
     # получен ответ, проверяющий обязан увидеть буквально.
+    # ★Ступень чтения дописывается в ссылки ТУТ ЖЕ, тем же кодом и по той же
+    # причине, что и оговорка про источники: метка посчитана при индексации, и
+    # довезти её до читателя обязан тот, кто владеет и ответом, и фрагментами.
+    # Модели она не показывается вовсе — см. citations.annotate_answer.
+    answer, confidence_marks = citations.annotate_answer(answer, fed_hits)
     answer += prompts.sources_status_note(reports_status, web_status, answer_present)
     # Ход дописывается в историю здесь, в единственном месте, где разговор
     # действительно состоялся: вопрос задан и ответ получен.
@@ -797,6 +810,7 @@ def node_answer(state: AgentState) -> AgentState:
         "answer": answer,
         "history": [{"question": question, "answer": answer}],
         "fed_chunk_ids": fed_chunk_ids,
+        "confidence_marks": confidence_marks,
         # Замер берётся с тех самых строк, которые ушли в промпт, а не
         # пересчитывается по правилам: прибор зовёт тракт, а не повторяет его.
         "context_used": {

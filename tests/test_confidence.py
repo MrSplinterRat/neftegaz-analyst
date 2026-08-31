@@ -154,3 +154,121 @@ def test_confidence_reaches_the_citation():
     rendered = format_claim(hit.as_claim())
     assert "с. 22" in rendered
     assert "расходятся" in rendered
+
+
+# ── ступень доезжает до ТЕКСТА ответа, а не только до карточки источника ────
+#
+# ★Мера этой ветки объявлена до кода и состоит из двух половин, потому что одна
+# половина без другой ничего не доказывает. Верхняя: ответ, стоящий на спорных
+# страницах, обязан ВЫГЛЯДЕТЬ иначе — иначе метка декоративна. Нижняя: ответ,
+# стоящий на чистых страницах, обязан остаться БАЙТ В БАЙТ прежним — иначе мы
+# просто покрасили всё подряд, и пометка перестала что-либо различать.
+
+
+ANSWER = (
+    "Добыча в США — 13.28 млн барр./сут [Отчёт EIA STEO, июль 2026, с. 35–36]. "
+    "Тот же источник называет 13.51 [Отчёт EIA STEO, июль 2026, с. 35–36]. "
+    "Потребление приведено отдельно [Отчёт EIA STEO, май 2026, с. 40–41]."
+)
+
+
+def make_hit(date: str, page: int, page_end: int, confidence: str):
+    from neftegaz.rag.store import Hit
+
+    return Hit(
+        text="13.28 13.51",
+        score=0.7,
+        source_name="EIA STEO",
+        date=date,
+        page=page,
+        page_end=page_end,
+        confidence=confidence,
+    )
+
+
+def test_clean_answer_is_left_byte_for_byte_alone():
+    from neftegaz.tools.citations import annotate_answer
+
+    hits = [
+        make_hit("июль 2026", 35, 36, DIRECT),
+        make_hit("май 2026", 40, 41, DIRECT),
+    ]
+    text, stats = annotate_answer(ANSWER, hits)
+    assert text == ANSWER
+    assert stats == {"citations": 3, "marked": 0, "unmatched": 0}
+
+
+def test_a_disputed_answer_looks_different_and_says_what_to_do():
+    from neftegaz.tools.citations import annotate_answer
+
+    hits = [
+        make_hit("июль 2026", 35, 36, DISPUTED),
+        make_hit("май 2026", 40, 41, GEOMETRY),
+    ]
+    text, stats = annotate_answer(ANSWER, hits)
+    assert text != ANSWER
+    assert stats == {"citations": 3, "marked": 3, "unmatched": 0}
+    # Пометка стои́т внутри ссылки, у каждой её встречи.
+    assert text.count("⚠ два пути чтения расходятся по цифрам") == 3
+    assert "с. 40–41; текст собран по геометрии страницы]" in text
+    # И один раз — что читателю с этим делать.
+    assert text.count("Как читать пометки у ссылок") == 1
+    assert "открой страницу отчёта и прочти её глазами" in text
+    assert "год, квартал, единицы" in text
+
+
+def test_the_worst_level_of_the_covered_fragments_wins():
+    """Одна ссылка — одна метка, и она отвечает за весь приведённый текст."""
+    from neftegaz.tools.citations import annotate_answer
+
+    hits = [
+        make_hit("июль 2026", 35, 35, DIRECT),
+        make_hit("июль 2026", 36, 36, DISPUTED),
+        make_hit("май 2026", 40, 41, DIRECT),
+    ]
+    text, stats = annotate_answer(ANSWER, hits)
+    assert stats["marked"] == 2
+    assert "с. 35–36; ⚠ два пути чтения расходятся по цифрам]" in text
+    assert "с. 40–41]" in text
+
+
+def test_a_citation_no_fed_fragment_covers_is_counted_not_guessed():
+    """«Прочитано напрямую» по умолчанию заверило бы непроверенное."""
+    from neftegaz.tools.citations import annotate_answer
+
+    text, stats = annotate_answer(ANSWER, [make_hit("июль 2026", 35, 36, DIRECT)])
+    assert text == ANSWER
+    assert stats["unmatched"] == 1
+    assert stats["marked"] == 0
+
+
+def test_marking_twice_does_not_stack_marks():
+    from neftegaz.tools.citations import annotate_answer
+
+    hits = [make_hit("июль 2026", 35, 36, DISPUTED), make_hit("май 2026", 40, 41, DIRECT)]
+    once, _ = annotate_answer(ANSWER, hits)
+    twice, stats = annotate_answer(once, hits)
+    assert twice == once
+    assert stats["marked"] == 0
+    assert stats["citations"] == 3
+
+
+def test_a_marked_citation_is_still_a_citation_for_the_checker():
+    """★Худший исход был бы такой: чем громче оговорка, тем меньше проверки.
+
+    Сверка цитат находит ссылки тем же шаблоном. Если бы дописанная пометка
+    выводила ссылку из-под шаблона, спорные цитаты — ровно те, которые важнее
+    всего проверить, — молча перестали бы проверяться, а отчёт сверки остался
+    бы зелёным.
+    """
+    from neftegaz.tools.citations import CITATION, annotate_answer
+
+    hits = [make_hit("июль 2026", 35, 36, DISPUTED), make_hit("май 2026", 40, 41, DIRECT)]
+    text, _ = annotate_answer(ANSWER, hits)
+    found = CITATION.findall(text)
+    assert len(found) == 3
+    assert [(row[1], row[2], row[3]) for row in found] == [
+        ("июль 2026", "35", "36"),
+        ("июль 2026", "35", "36"),
+        ("май 2026", "40", "41"),
+    ]
