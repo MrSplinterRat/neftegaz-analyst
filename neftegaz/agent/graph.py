@@ -121,6 +121,14 @@ class AgentState(TypedDict, total=False):
     # польза повторного использования — в НАЙДЕННОМ, а процитированное и так
     # стои́т в ответе. Едут ТОЛЬКО идентификаторы, никогда не текст ответа.
     fed_chunk_ids: list[str]
+    # Идентификаторы из ПОДКЛЮЧЁННЫХ разговоров, собранные до запуска графа.
+    # Оттуда приезжают только ссылки на отчёты и НИ ОДНОГО утверждения модели,
+    # поэтому круговая ссылка невозможна по устройству.
+    linked_chunk_ids: list[str]
+    # Сколько подключённых ссылок не нашлось в индексе: фрагмент изменился при
+    # пересборке, и ссылка на него законно перестала работать. Показывается
+    # вслух — молча пустая выдача неотличима от «ничего подходящего не было».
+    stale_links: int
     # То же самое для веб-поиска: "" — прошёл, "unavailable: …" — библиотеки нет,
     # "failed: …" — сеть или разбор отказали. Веб — источник дополнительный, но
     # молчание его отказа обходится так же дорого: на вопросе про сегодняшнюю
@@ -331,6 +339,55 @@ def format_history(turns: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def merge_borrowed(hits: list[Any], borrowed: list[Any]) -> list[Any]:
+    """Слить обычные находки с фрагментами из подключённых разговоров.
+
+    ★ОБЩАЯ ШКАЛА И НИКАКОГО БОНУСА. Оценка у обоих списков — один и тот же
+    косинус между вопросом и вектором фрагмента, порог тоже один. Подключённый
+    фрагмент попадает в выдачу ровно тогда, когда обходит обычного кандидата по
+    этой мере, и никогда — за факт подключения.
+
+    ★ПОРЯДОК ОБЫЧНЫХ НАХОДОК НЕ ТРОГАЕТСЯ. Их выстроил гибридный поиск (слияние
+    двух ветвей по RRF), и пересортировать их по косинусу значило бы менять
+    выдачу на вопросах, к подключённому разговору отношения не имеющих, — то
+    есть проваливать отрицательный контроль по причине, к подключению не
+    относящейся. Поэтому заимствованный фрагмент ВСТАВЛЯЕТСЯ в готовый список
+    перед первым, кого он превосходит, а порядок остальных сохраняется.
+
+    Длина выдачи не растёт: кто вошёл, тот кого-то вытеснил. Иначе подключение
+    раздувало бы контекст, и «помогает» стало бы неотличимо от «подаёт больше».
+
+    ★ВЫТЕСНЯЕТСЯ САМЫЙ СЛАБЫЙ ПО ОЦЕНКЕ, А НЕ ПОСЛЕДНИЙ В СПИСКЕ, и вход
+    разрешён только тому, кто этого слабейшего превосходит. Первая версия
+    роняла хвост списка — и отрицательный контроль немедленно поймал случай,
+    где фрагмент с оценкой 0.6592 вытеснил фрагмент с 0.6842: заимствованный
+    выигрывал ПОЗИЦИЕЙ, а не мерой, потому что порядок обычных находок задан
+    слиянием двух ветвей, а не косинусом. Это ровно тот бонус, которого здесь
+    быть не должно, только выданный незаметно.
+    """
+    if not borrowed:
+        return hits
+    known = {getattr(hit, "chunk_id", "") for hit in hits}
+    limit = len(hits) if hits else settings.top_k
+    merged = list(hits)
+    for extra in borrowed:
+        identifier = getattr(extra, "chunk_id", "")
+        if identifier and identifier in known:
+            continue
+        if len(merged) >= limit:
+            weakest = min(merged, key=lambda hit: hit.score)
+            if extra.score <= weakest.score:
+                continue
+            merged.remove(weakest)
+        place = next(
+            (i for i, hit in enumerate(merged) if extra.score > hit.score),
+            len(merged),
+        )
+        merged.insert(place, extra)
+        known.add(identifier)
+    return merged
+
+
 def _report_blocks(hits: list[Any]) -> list[str]:
     """Блоки контекста по фрагментам — по одному на фрагмент, в том же порядке.
 
@@ -456,6 +513,7 @@ def node_route(state: AgentState) -> AgentState:
         "reports_status": "",
         "web_status": "",
         "fed_chunk_ids": [],
+        "stale_links": 0,
     }
     pending = state.get("pending_question") or ""
     if pending:
@@ -566,7 +624,24 @@ def node_retrieve(state: AgentState) -> AgentState:
         status = "" if hits else ("empty" if store.count() == 0 else "")
     except Exception as exc:  # noqa: BLE001 - отказ поиска не вправе убить ответ
         return {"report_hits": [], "used_reports": False, "reports_status": f"failed: {exc}"}
-    return {"report_hits": hits, "used_reports": bool(hits), "reports_status": status}
+
+    borrowed = state.get("linked_chunk_ids") or []
+    stale = 0
+    if borrowed:
+        try:
+            extra, stale = store.fetch_scored(list(borrowed), state["question"])
+            hits = merge_borrowed(hits, extra)
+        except Exception as exc:  # noqa: BLE001 - подключение не вправе сломать поиск
+            # Подключение разговоров — удобство поверх основного пути. Его отказ
+            # обязан стоить подсказки, а не ответа, и обязан быть НАЗВАН.
+            stale = 0
+            status = status or f"linked-failed: {exc}"
+    return {
+        "report_hits": hits,
+        "used_reports": bool(hits),
+        "reports_status": status,
+        "stale_links": stale,
+    }
 
 
 def node_web(state: AgentState) -> AgentState:
@@ -923,6 +998,38 @@ def answer_question(question: str, thread_id: str | None = None) -> AgentState:
     global _COMPILED
     if _COMPILED is None:
         _COMPILED = build_graph(build_checkpointer())
-    initial: AgentState = {"question": question, "used_web": False, "used_reports": False}
-    config = {"configurable": {"thread_id": thread_id or new_thread_id()}}
+    thread = thread_id or new_thread_id()
+    initial: AgentState = {
+        "question": question,
+        "used_web": False,
+        "used_reports": False,
+        # ★Ссылки подключённых разговоров собираются ЗДЕСЬ, а не внутри узла.
+        # Узлы остаются чистыми функциями состояния: их можно прогнать без
+        # хранилища разговоров, и проверка подключения не требует поднимать
+        # реестр. Оттуда приезжают ТОЛЬКО идентификаторы фрагментов.
+        "linked_chunk_ids": _borrowed_chunk_ids(thread),
+    }
+    config = {"configurable": {"thread_id": thread}}
     return _COMPILED.invoke(initial, config=config)
+
+
+def _borrowed_chunk_ids(thread_id: str) -> list[str]:
+    """След находок подключённых разговоров — пустой список, если реестра нет.
+
+    Отказ реестра не вправе уронить ответ: подключение разговоров — удобство
+    поверх основного пути, а основной путь обязан работать и без него.
+
+    ★Возможность выключена умолчанием, потому что её отрицательный контроль не
+    пройден: на посторонних вопросах выдача менялась в 1 случае из 6 при
+    требовании «около нуля». Код на месте и покрыт тестами, но включается
+    осознанно — `LINK_THREADS=true`.
+    """
+    if not settings.link_threads:
+        return []
+    try:
+        from neftegaz.agent.threads import get_registry
+
+        registry = get_registry()
+        return registry.linked_chunk_ids(thread_id) if registry else []
+    except Exception:  # noqa: BLE001
+        return []

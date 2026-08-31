@@ -35,6 +35,23 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Булева настройка. Неизвестное значение — ошибка, а не тихое «нет».
+
+    Тихий откат превратил бы опечатку в выключенную возможность, о которой
+    никто не узнает: система выглядела бы исправной и просто ничего не делала.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean (true/false), got {raw!r}")
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -199,6 +216,21 @@ class Settings:
     # отдавало бы урезанный продукт. Кому нельзя писать на диск, ставит `memory`
     # одной правкой, и система об этом честно говорит.
     conversation_memory: str = field(default_factory=lambda: _env("CONVERSATION_MEMORY", "sqlite"))
+    # ★ПОДКЛЮЧЕНИЕ РАЗГОВОРОВ ИСТОЧНИКАМИ ССЫЛОК — ВЫКЛЮЧЕНО, И ЭТО ИЗМЕРЕНО.
+    #
+    # Возможность написана и покрыта тестами: из подключённого разговора едут
+    # только идентификаторы найденных ранее фрагментов, они соревнуются с
+    # обычными кандидатами по той же мере и без всякой надбавки.
+    #
+    # Польза измерена и есть: на двух переформулировках из трёх нужный фрагмент
+    # входит в top-5, куда без подключения не попадал. Но ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ
+    # НЕ ПРОЙДЕН: на вопросах, к подключённому разговору отношения не имеющих,
+    # выдача менялась в 1 случае из 6 (17%), а требовалось «около нуля».
+    #
+    # Незамеренная возможность в поставке хуже отсутствующей: она выглядит
+    # работающей. Поэтому умолчание — «выключено», а не «почти работает».
+    # Включается `LINK_THREADS=true` тем, кто согласен с этой ценой.
+    link_threads: bool = field(default_factory=lambda: _env_bool("LINK_THREADS", False))
     checkpoint_db: str = field(
         default_factory=lambda: _env("CHECKPOINT_DB", str(ROOT / "data" / "conversations.sqlite"))
     )

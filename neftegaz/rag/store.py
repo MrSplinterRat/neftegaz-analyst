@@ -628,6 +628,67 @@ class ReportStore:
             result[point.id] = dot / (query_norm * norm)
         return result
 
+    def fetch_scored(
+        self, chunk_ids: list[str], query: str, min_score: float | None = None
+    ) -> tuple[list[Hit], int]:
+        """Оценить названные фрагменты по тому же вопросу. Возвращает и число потерянных.
+
+        Нужно для подключённых разговоров: оттуда приезжают ТОЛЬКО
+        идентификаторы, и чтобы фрагмент мог соревноваться с обычными
+        кандидатами, ему нужна оценка **по той же мере и с тем же порогом** —
+        косинус между вопросом и вектором фрагмента.
+
+        ★НИКАКОГО БОНУСА. Подключённый фрагмент не получает надбавки за то, что
+        он подключённый: иначе его вклад в выдачу был бы выбранным порогом, а не
+        измеренным, и отличить «подключение помогает» от «подключение всё
+        перемешивает» стало бы нечем.
+
+        ★ВТОРОЕ ЧИСЛО — ПОТЕРЯННЫЕ ССЫЛКИ, и оно возвращается, а не проглатывается.
+        Идентификатор выведен из содержания фрагмента, поэтому при пересборке
+        индекса ссылка на изменившийся фрагмент перестаёт находиться. Это верное
+        поведение: изменившийся фрагмент — уже не тот, на который ссылались. Но
+        ломаться оно обязано ВСЛУХ: молча пустая выдача неотличима от «в
+        подключённом разговоре ничего подходящего не нашлось».
+        """
+        if not chunk_ids or not self.client.collection_exists(self.collection):
+            return [], 0
+        floor = settings.min_score if min_score is None else min_score
+        points = self.client.retrieve(
+            collection_name=self.collection,
+            ids=chunk_ids,
+            with_payload=True,
+            with_vectors=False,
+        )
+        found = {str(point.id): point.payload or {} for point in points}
+        stale = len(chunk_ids) - len(found)
+
+        query_vector = self._embed_query(query)
+        cosine_of = self._cosines(list(found), query_vector)
+
+        hits = []
+        for identifier, payload in found.items():
+            score = cosine_of.get(identifier, 0.0)
+            if score < floor:
+                continue
+            if carries_no_data(payload.get("text", "")):
+                continue
+            hits.append(
+                Hit(
+                    text=payload.get("text", ""),
+                    score=score,
+                    source_name=payload.get("source_name", "unknown"),
+                    date=payload.get("date", ""),
+                    page=int(payload.get("page", 0)),
+                    page_end=int(payload.get("page_end", payload.get("page", 0))),
+                    context=payload.get("context", ""),
+                    confidence=payload.get("confidence", "unchecked"),
+                    caveats=tuple(payload.get("caveats", ())),
+                    chunk_id=identifier,
+                )
+            )
+        hits.sort(key=lambda hit: (-hit.score, _identity_of({"text": hit.text})))
+        return hits, stale
+
     def count(self) -> int:
         if not self.client.collection_exists(self.collection):
             return 0

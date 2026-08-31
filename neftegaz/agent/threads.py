@@ -198,6 +198,15 @@ CREATE TABLE IF NOT EXISTS turn_chunks (
     PRIMARY KEY (turn_id, chunk_id)
 );
 
+-- ★Подключённые разговоры — ТОЛЬКО ПРЯМЫЕ. Транзитивность запрещена намеренно:
+-- она приносит циклы, глубину и веса, а даёт неочевидно много. Ограничение
+-- названо в README, а не спрятано в коде.
+CREATE TABLE IF NOT EXISTS thread_links (
+    thread_id TEXT NOT NULL,
+    linked_id TEXT NOT NULL,
+    PRIMARY KEY (thread_id, linked_id)
+);
+
 CREATE INDEX IF NOT EXISTS turns_by_thread ON turns (thread_id, ordinal);
 CREATE INDEX IF NOT EXISTS threads_by_updated ON threads (updated_at DESC);
 
@@ -428,6 +437,13 @@ class ThreadRegistry:
                 (thread_id,),
             )
             self._db.execute("DELETE FROM turns WHERE thread_id = ?", (thread_id,))
+            # Подключения уходят В ОБЕ СТОРОНЫ: и те, что делал этот разговор,
+            # и те, что делали на него. Иначе у чужой нити остался бы источник,
+            # которого больше нет, и она молча искала бы по пустому следу.
+            self._db.execute(
+                "DELETE FROM thread_links WHERE thread_id = ? OR linked_id = ?",
+                (thread_id, thread_id),
+            )
             for table in ("checkpoints", "writes"):
                 if table in present:
                     self._db.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
@@ -457,6 +473,56 @@ class ThreadRegistry:
                 seen.add(row["chunk_id"])
                 trail.append(row["chunk_id"])
         return trail
+
+    # ── подключение разговоров источниками ссылок ──────────────────────────
+
+    def link(self, thread_id: str, linked_id: str) -> bool:
+        """Подключить разговор как источник ссылок. Себя подключить нельзя."""
+        if thread_id == linked_id:
+            return False
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO thread_links (thread_id, linked_id) VALUES (?, ?)",
+                (thread_id, linked_id),
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+    def unlink(self, thread_id: str, linked_id: str) -> bool:
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM thread_links WHERE thread_id = ? AND linked_id = ?",
+                (thread_id, linked_id),
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+    def links(self, thread_id: str) -> list[str]:
+        """Подключённые разговоры — ТОЛЬКО ПРЯМЫЕ, без обхода вглубь.
+
+        ★Транзитивности здесь нет и не будет случайно: функция читает одну
+        строку таблицы и не рекурсивна. Запрет держится устройством, а не
+        аккуратностью вызывающего.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT l.linked_id FROM thread_links l "
+                "JOIN threads t ON t.thread_id = l.linked_id "
+                "WHERE l.thread_id = ? ORDER BY t.updated_at DESC",
+                (thread_id,),
+            ).fetchall()
+        return [r["linked_id"] for r in rows]
+
+    def linked_chunk_ids(self, thread_id: str) -> list[str]:
+        """След находок всех подключённых разговоров, свежее впереди."""
+        seen: set[str] = set()
+        collected = []
+        for linked in self.links(thread_id):
+            for chunk in self.chunk_trail(linked):
+                if chunk not in seen:
+                    seen.add(chunk)
+                    collected.append(chunk)
+        return collected
 
     # ── сквозной поиск по разговорам ───────────────────────────────────────
 

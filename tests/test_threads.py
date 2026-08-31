@@ -448,3 +448,79 @@ def test_trails_of_different_threads_do_not_mix(registry):
     registry.record_turn("t2", "Другой", "Ответ.", chunk_ids=["bbb"])
     assert registry.chunk_trail("t1") == ["aaa"]
     assert registry.chunk_trail("t2") == ["bbb"]
+
+
+# ── подключение разговоров (Ш3): хранение связей ──────────────────────────
+
+
+def test_a_linked_thread_lends_its_trail(registry):
+    registry.record_turn("донор", "Запасы США?", "Ответ.", chunk_ids=["aaa", "bbb"])
+    registry.record_turn("текущий", "Другой вопрос", "Ответ.", chunk_ids=["ccc"])
+    registry.link("текущий", "донор")
+    assert registry.linked_chunk_ids("текущий") == ["aaa", "bbb"]
+
+
+def test_linking_is_not_transitive(registry):
+    """★Транзитивность запрещена, и запрет держится устройством, а не памятью.
+
+    Подключение A→B→C не даёт A ссылок C: циклы, глубина и веса стоят дороже,
+    чем дают. Ограничение названо в README, а не спрятано в коде.
+    """
+    registry.record_turn("A", "?", "Ответ.", chunk_ids=["a"])
+    registry.record_turn("B", "?", "Ответ.", chunk_ids=["b"])
+    registry.record_turn("C", "?", "Ответ.", chunk_ids=["c"])
+    registry.link("A", "B")
+    registry.link("B", "C")
+    assert registry.linked_chunk_ids("A") == ["b"], "ссылки C приезжать не должны"
+
+
+def test_a_thread_cannot_link_to_itself(registry):
+    registry.record_turn("A", "?", "Ответ.", chunk_ids=["a"])
+    assert registry.link("A", "A") is False
+    assert registry.linked_chunk_ids("A") == []
+
+
+def test_a_cycle_of_two_does_not_hang(registry):
+    """Взаимное подключение законно и не зацикливается: обход глубиной в один шаг."""
+    registry.record_turn("A", "?", "Ответ.", chunk_ids=["a"])
+    registry.record_turn("B", "?", "Ответ.", chunk_ids=["b"])
+    registry.link("A", "B")
+    registry.link("B", "A")
+    assert registry.linked_chunk_ids("A") == ["b"]
+    assert registry.linked_chunk_ids("B") == ["a"]
+
+
+def test_links_survive_a_restart(registry):
+    registry.record_turn("A", "?", "Ответ.", chunk_ids=["a"])
+    registry.record_turn("B", "?", "Ответ.", chunk_ids=["b"])
+    registry.link("A", "B")
+    fresh = reopen(registry)
+    try:
+        assert fresh.links("A") == ["B"]
+    finally:
+        fresh.close()
+
+
+def test_unlinking_removes_the_source(registry):
+    registry.record_turn("A", "?", "Ответ.", chunk_ids=["a"])
+    registry.record_turn("B", "?", "Ответ.", chunk_ids=["b"])
+    registry.link("A", "B")
+    assert registry.unlink("A", "B") is True
+    assert registry.linked_chunk_ids("A") == []
+
+
+def test_deleting_a_thread_removes_links_in_both_directions(registry):
+    """★Иначе у чужой нити остался бы источник, которого нет, и она молча
+    искала бы по пустому следу — отказ, выдающий себя за отсутствие данных."""
+    registry.record_turn("A", "?", "Ответ.", chunk_ids=["a"])
+    registry.record_turn("B", "?", "Ответ.", chunk_ids=["b"])
+    registry.link("A", "B")
+    registry.link("B", "A")
+    registry.delete("B")
+    fresh = reopen(registry)
+    try:
+        assert fresh.links("A") == []
+        left = fresh._db.execute("SELECT count(*) FROM thread_links").fetchone()[0]
+        assert left == 0
+    finally:
+        fresh.close()
