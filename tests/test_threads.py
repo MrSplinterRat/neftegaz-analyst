@@ -381,3 +381,70 @@ def test_history_is_capped_and_evicts_the_oldest(registry):
 def test_an_empty_query_is_not_remembered(registry):
     registry.record_search("   ", 0)
     assert registry.list_searches() == []
+
+
+# ── след находок (Ш2) ─────────────────────────────────────────────────────
+
+
+def test_a_turn_remembers_which_chunks_were_fed(registry):
+    registry.record_turn("t1", "Вопрос", "Ответ.", chunk_ids=["aaa", "bbb"])
+    assert registry.chunk_trail("t1") == ["aaa", "bbb"]
+
+
+def test_the_trail_keeps_only_identifiers_and_never_text(registry):
+    """★Из подключаемого разговора обязаны ехать ССЫЛКИ, а не утверждения.
+
+    Проверка структурная, а не по договорённости: в таблице следа есть колонка
+    под идентификатор и нет ни одной под текст, поэтому круговая ссылка
+    («модель цитирует саму себя») невозможна по устройству, а не по дисциплине.
+    """
+    columns = {row[1] for row in registry._db.execute("PRAGMA table_info(turn_chunks)")}
+    assert columns == {"turn_id", "chunk_id", "position"}
+
+
+def test_the_trail_survives_a_restart(registry):
+    registry.record_turn("t1", "Вопрос", "Ответ.", chunk_ids=["aaa"])
+    fresh = reopen(registry)
+    try:
+        assert fresh.chunk_trail("t1") == ["aaa"]
+    finally:
+        fresh.close()
+
+
+def test_the_freshest_turn_leads_the_trail(registry):
+    registry.record_turn("t1", "Первый", "Ответ.", chunk_ids=["старое"])
+    registry.record_turn("t1", "Второй", "Ответ.", chunk_ids=["свежее"])
+    assert registry.chunk_trail("t1") == ["свежее", "старое"]
+
+
+def test_a_chunk_seen_twice_is_listed_once(registry):
+    registry.record_turn("t1", "Первый", "Ответ.", chunk_ids=["aaa", "bbb"])
+    registry.record_turn("t1", "Второй", "Ответ.", chunk_ids=["bbb", "ccc"])
+    assert registry.chunk_trail("t1") == ["bbb", "ccc", "aaa"]
+
+
+def test_a_turn_without_a_trail_is_normal(registry):
+    """Ход без найденных фрагментов — обычное дело: вопрос вне области, отказ
+    поиска, расчёт без отчётов. Пустой след не должен ломать запись хода."""
+    registry.record_turn("t1", "Посоветуй рецепт борща", "Это вне моей области.")
+    assert registry.chunk_trail("t1") == []
+    assert registry.get("t1").turns == 1
+
+
+def test_deleting_a_thread_takes_its_trail_with_it(registry):
+    registry.record_turn("t1", "Вопрос", "Ответ.", chunk_ids=["aaa"])
+    registry.record_turn("t2", "Другой", "Ответ.", chunk_ids=["bbb"])
+    registry.delete("t1")
+    fresh = reopen(registry)
+    try:
+        left = fresh._db.execute("SELECT chunk_id FROM turn_chunks").fetchall()
+        assert [r[0] for r in left] == ["bbb"], "след удалённой нити обязан уйти вместе с ней"
+    finally:
+        fresh.close()
+
+
+def test_trails_of_different_threads_do_not_mix(registry):
+    registry.record_turn("t1", "Вопрос", "Ответ.", chunk_ids=["aaa"])
+    registry.record_turn("t2", "Другой", "Ответ.", chunk_ids=["bbb"])
+    assert registry.chunk_trail("t1") == ["aaa"]
+    assert registry.chunk_trail("t2") == ["bbb"]

@@ -116,6 +116,11 @@ class AgentState(TypedDict, total=False):
     # поиск отказал. Без этого поля все три вида пустоты выглядели одним, и
     # «я не смог» уходило в ответ как «этого нет».
     reports_status: str
+    # Идентификаторы фрагментов, РЕАЛЬНО поданных модели на этом ходу. Не все
+    # найденные (хвост отбрасывается по бюджету) и не только процитированные:
+    # польза повторного использования — в НАЙДЕННОМ, а процитированное и так
+    # стои́т в ответе. Едут ТОЛЬКО идентификаторы, никогда не текст ответа.
+    fed_chunk_ids: list[str]
     # То же самое для веб-поиска: "" — прошёл, "unavailable: …" — библиотеки нет,
     # "failed: …" — сеть или разбор отказали. Веб — источник дополнительный, но
     # молчание его отказа обходится так же дорого: на вопросе про сегодняшнюю
@@ -326,8 +331,14 @@ def format_history(turns: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def _format_report_context(hits: list[Any]) -> str:
-    """Render retrieved chunks with the metadata the citation format needs."""
+def _report_blocks(hits: list[Any]) -> list[str]:
+    """Блоки контекста по фрагментам — по одному на фрагмент, в том же порядке.
+
+    Вынесено отдельно, чтобы «что подано в контекст» и «чем подано» считались
+    ОДНИМ кодом. Список поданных фрагментов, собранный вторым проходом по своим
+    правилам, разошёлся бы с настоящим при первой же правке бюджета — и не подал
+    бы об этом ни одного признака.
+    """
     blocks = []
     for hit in hits:
         header = (
@@ -349,7 +360,27 @@ def _format_report_context(hits: list[Any]) -> str:
             blocks.append(f"{header}\n[{' | '.join(marks)}]\n{_clip(hit.text)}")
         else:
             blocks.append(f"{header}\n{_clip(hit.text)}")
-    return "\n\n".join(_fit(blocks, REPORT_BUDGET_CHARS))
+    return blocks
+
+
+def _format_report_context(hits: list[Any]) -> str:
+    """Render retrieved chunks with the metadata the citation format needs."""
+    return "\n\n".join(_fit(_report_blocks(hits), REPORT_BUDGET_CHARS))
+
+
+def fed_report_hits(hits: list[Any]) -> list[Any]:
+    """Фрагменты, РЕАЛЬНО поданные в контекст, — не все найденные.
+
+    Различие существенное: `_fit` отбрасывает хвост списка по бюджету знаков, и
+    фрагмент, который нашёлся, но не влез, модель не видела. Записывать его в
+    след находок значило бы утверждать, что разговор его читал.
+
+    ★Функция не повторяет отбор, а ЗОВЁТ его: те же блоки, тот же `_fit`. Отбор
+    оставляет ПРЕФИКС списка (см. `_fit`), поэтому пара «фрагмент ↔ уцелевший
+    блок» получается сопоставлением по порядку.
+    """
+    kept = _fit(_report_blocks(hits), REPORT_BUDGET_CHARS)
+    return [hit for hit, _ in zip(hits, kept, strict=False)]
 
 
 def _format_web_context(hits: list[Any]) -> str:
@@ -424,6 +455,7 @@ def node_route(state: AgentState) -> AgentState:
         "scenario_waived": False,
         "reports_status": "",
         "web_status": "",
+        "fed_chunk_ids": [],
     }
     pending = state.get("pending_question") or ""
     if pending:
@@ -627,7 +659,16 @@ def node_forecast(state: AgentState) -> AgentState:
 def node_answer(state: AgentState) -> AgentState:
     """Compose the final answer from whatever the branches gathered."""
     question = state["question"]
-    report_context = _format_report_context(state.get("report_hits") or [])
+    hits = state.get("report_hits") or []
+    # ★След находок рождается ЗДЕСЬ, где решается, что попадёт в контекст, а не
+    # пересчитывается снаружи по тем же правилам: счётчик, стоящий не там, где
+    # принимается решение, считает не то, что решено.
+    fed_chunk_ids = [
+        identifier
+        for identifier in (getattr(hit, "chunk_id", "") for hit in fed_report_hits(hits))
+        if identifier
+    ]
+    report_context = _format_report_context(hits)
     web_context = _format_web_context(state.get("web_hits") or [])
     history_context = format_history(state.get("history") or [])
 
@@ -671,7 +712,11 @@ def node_answer(state: AgentState) -> AgentState:
     answer += prompts.sources_status_note(reports_status, web_status, answer_present)
     # Ход дописывается в историю здесь, в единственном месте, где разговор
     # действительно состоялся: вопрос задан и ответ получен.
-    return {"answer": answer, "history": [{"question": question, "answer": answer}]}
+    return {
+        "answer": answer,
+        "history": [{"question": question, "answer": answer}],
+        "fed_chunk_ids": fed_chunk_ids,
+    }
 
 
 def node_clarify(state: AgentState) -> AgentState:

@@ -32,6 +32,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -185,6 +186,18 @@ CREATE TABLE IF NOT EXISTS turns (
     answer    TEXT NOT NULL
 );
 
+-- ★След находок: ТОЛЬКО идентификаторы фрагментов, никогда не текст. Живая
+-- ссылка, а не снимок: копия текста была бы второй истиной, расходящейся с
+-- отчётом при первой же пересборке индекса. Идентификатор выведен из
+-- содержания фрагмента (`rag/store.py:chunk_id`), поэтому осмыслен на любой
+-- сборке — и перестаёт находиться ровно тогда, когда фрагмент изменился.
+CREATE TABLE IF NOT EXISTS turn_chunks (
+    turn_id  INTEGER NOT NULL,
+    chunk_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (turn_id, chunk_id)
+);
+
 CREATE INDEX IF NOT EXISTS turns_by_thread ON turns (thread_id, ordinal);
 CREATE INDEX IF NOT EXISTS threads_by_updated ON threads (updated_at DESC);
 
@@ -318,12 +331,21 @@ class ThreadRegistry:
 
     # ── запись ─────────────────────────────────────────────────────────────
 
-    def record_turn(self, thread_id: str, question: str, answer: str) -> None:
+    def record_turn(
+        self,
+        thread_id: str,
+        question: str,
+        answer: str,
+        chunk_ids: Sequence[str] = (),
+    ) -> None:
         """Записать ход и подтянуть за ним запись о самой нити.
 
         Заголовок ставится по ПЕРВОМУ вопросу и больше не меняется сам:
         разговор узнаётся по тому, с чего начался, а не по тому, о чём зашла
         речь на десятом ходу.
+
+        ``chunk_ids`` — след находок: идентификаторы фрагментов, реально
+        поданных модели на этом ходу. Порядок сохраняется, повторы отбрасываются.
         """
         stamp = _now()
         with self._lock:
@@ -339,11 +361,24 @@ class ThreadRegistry:
                 ordinal = 1
             else:
                 ordinal = int(cur["turns"]) + 1
-            self._db.execute(
+            cursor = self._db.execute(
                 "INSERT INTO turns (thread_id, ordinal, asked_at, question, answer) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (thread_id, ordinal, stamp, question, answer),
             )
+            turn_id = cursor.lastrowid
+            seen: set[str] = set()
+            trail = []
+            for chunk in chunk_ids:
+                if chunk and chunk not in seen:
+                    seen.add(chunk)
+                    trail.append((turn_id, chunk, len(trail)))
+            if trail:
+                self._db.executemany(
+                    "INSERT OR IGNORE INTO turn_chunks (turn_id, chunk_id, position) "
+                    "VALUES (?, ?, ?)",
+                    trail,
+                )
             self._db.execute(
                 "UPDATE threads SET turns = ?, updated_at = ? WHERE thread_id = ?",
                 (ordinal, stamp, thread_id),
@@ -387,6 +422,11 @@ class ThreadRegistry:
             }
             cur = self._db.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
             removed = cur.rowcount > 0
+            self._db.execute(
+                "DELETE FROM turn_chunks WHERE turn_id IN "
+                "(SELECT turn_id FROM turns WHERE thread_id = ?)",
+                (thread_id,),
+            )
             self._db.execute("DELETE FROM turns WHERE thread_id = ?", (thread_id,))
             for table in ("checkpoints", "writes"):
                 if table in present:
@@ -394,6 +434,29 @@ class ThreadRegistry:
             self._db.commit()
         return removed
 
+
+    def chunk_trail(self, thread_id: str) -> list[str]:
+        """Все фрагменты, поданные в контекст за время разговора.
+
+        Порядок — от свежего хода к старому, внутри хода — как подавались.
+        Свежее впереди намеренно: если след придётся урезать, разумнее потерять
+        то, что обсуждалось десять ходов назад.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT c.chunk_id FROM turn_chunks c "
+                "JOIN turns t ON t.turn_id = c.turn_id "
+                "WHERE t.thread_id = ? "
+                "ORDER BY t.ordinal DESC, c.position ASC",
+                (thread_id,),
+            ).fetchall()
+        seen: set[str] = set()
+        trail = []
+        for row in rows:
+            if row["chunk_id"] not in seen:
+                seen.add(row["chunk_id"])
+                trail.append(row["chunk_id"])
+        return trail
 
     # ── сквозной поиск по разговорам ───────────────────────────────────────
 

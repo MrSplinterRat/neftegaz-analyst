@@ -584,7 +584,15 @@ def render_chat() -> None:
     # бы сотней безымянных строк (замер 31.08: в чекпойнтере их накопилось 96).
     registry = get_registry()
     if registry is not None:
-        registry.record_turn(st.session_state.thread_id, question, answer)
+        registry.record_turn(
+            st.session_state.thread_id,
+            question,
+            answer,
+            # След находок — идентификаторы фрагментов, реально поданных модели
+            # на этом ходу. Их считает узел ответа, а не интерфейс: счётчик
+            # обязан стоять там, где принимается решение.
+            chunk_ids=state.get("fed_chunk_ids") or (),
+        )
     # Последнее состояние живёт отдельно от списка ходов: панель источников
     # показывает, чем отвечен ПОСЛЕДНИЙ вопрос, и хранить ради этого найденные
     # фрагменты всех прошлых ходов незачем.
