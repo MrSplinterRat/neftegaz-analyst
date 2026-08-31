@@ -24,8 +24,10 @@ __all__ = [
     "settings",
     "env_settings",
     "ROOT",
+    "SETTING_SPECS",
+    "SettingSpec",
     "TURN_PARAMETERS",
-    "TurnParameter",
+    "check_settings",
     "turn_parameter",
     "read_overrides",
     "set_turn_parameter",
@@ -148,9 +150,7 @@ class Settings:
     # Числа стояли константами в `neftegaz/agent/graph.py` — то есть снаружи
     # системы их не было видно вовсе, хотя именно они отвечают на вопрос
     # «почему модель не увидела найденный фрагмент».
-    report_budget_chars: int = field(
-        default_factory=lambda: _env_int("REPORT_BUDGET_CHARS", 7000)
-    )
+    report_budget_chars: int = field(default_factory=lambda: _env_int("REPORT_BUDGET_CHARS", 7000))
     web_budget_chars: int = field(default_factory=lambda: _env_int("WEB_BUDGET_CHARS", 4000))
     # Потолок на ОДИН фрагмент: без него один длинный фрагмент съедает бюджет
     # целиком и вытесняет остальные.
@@ -308,47 +308,92 @@ settings = Settings()
 env_settings = Settings()
 
 
-# ── параметры хода, правимые из интерфейса ─────────────────────────────────
+# ── реестр настроек: что считается пригодным значением ─────────────────────
 #
-# ★СПИСОК ЗАКРЫТЫЙ, И В ЭТОМ ВЕСЬ СМЫСЛ. Настройки системы делятся по тому, что
-# они ломают: параметры ХОДА действуют со следующего вопроса и не трогают
-# ничего, кроме него; параметры КОРПУСА (модель эмбеддингов, размер фрагмента,
-# коллекция) делают уже собранный индекс несогласованным с настройкой. Первые
-# можно править из интерфейса безопасно, вторые — нельзя, и разделение обязано
-# быть не советом в документации, а списком в коде: то, чего здесь нет, из
-# интерфейса не правится вовсе.
+# ★ОДИН РЕЕСТР НА ДВЕ РАБОТЫ. Границы нужны дважды: когда значение приходит из
+# интерфейса и когда оно приходит из `.env`. Две копии границ разошлись бы —
+# и разошлись бы молча, потому что расхождение видно только на кривом значении,
+# то есть в тот единственный день, когда проверка и нужна. Поэтому запись одна,
+# а «правится ли из интерфейса» — её признак.
+#
+# ★СПИСОК ПРАВИМЫХ ЗАКРЫТЫЙ, И В ЭТОМ ВЕСЬ СМЫСЛ. Настройки системы делятся по
+# тому, что они ломают: параметры ХОДА действуют со следующего вопроса и не
+# трогают ничего, кроме него; параметры КОРПУСА (модель эмбеддингов, размер
+# фрагмента, коллекция) делают уже собранный индекс несогласованным с
+# настройкой. Первые можно править из интерфейса безопасно, вторые — нельзя, и
+# разделение обязано быть не советом в документации, а списком в коде: то, чего
+# здесь нет, из интерфейса не правится вовсе.
+#
+# ★РЕЕСТР ОБЯЗАН НАКРЫВАТЬ ВСЕ ПОЛЯ `Settings` — это проверяется тестом. Поле,
+# у которого замкнутого множества значений нет (имя модели, путь, ключ), стоит
+# в реестре как `free` С ПРИЧИНОЙ. Разница между «проверять нечего» и «проверить
+# забыли» видна только тогда, когда первое написано вслух.
 
 
 @dataclass(frozen=True)
-class TurnParameter:
-    """Одна правимая настройка: имя поля, имя в `.env` и границы допустимого."""
+class SettingSpec:
+    """Одна настройка: имя поля, имя в `.env` и то, что считается пригодным."""
 
     field: str
     env: str
     label: str
-    kind: str  # "int" | "float" | "text"
+    kind: str  # "int" | "float" | "text" | "choice" | "bool" | "free"
     low: float | None = None
     high: float | None = None
     pattern: str | None = None
+    choices: tuple[str, ...] = ()
+    allow_empty: bool = False
+    # Правится ли из интерфейса. Умолчание — «нет»: расширение списка правимых
+    # обязано быть решением, а не следствием того, что поле кто-то добавил.
+    editable: bool = False
     note: str = ""
 
     def parse(self, raw):
-        """Разобрать введённое значение или отказать с внятной причиной.
+        """Разобрать значение или отказать с внятной причиной.
 
         ★Отказ громкий, а не тихий откат к прежнему. Опечатка, молча
         превращённая в умолчание, выглядит как исправная система, которая
-        почему-то делает не то.
+        почему-то делает не то. Именно так `ELASTICITY_SOURCE=mesured`
+        переключал расчёт с измеренной эластичности на литературную, меняя
+        числа в ответе и не говоря ни слова.
         """
+        if self.kind == "free":
+            # ★Проверять нечего, и это сказано вслух. Проверка «строка непуста»
+            # здесь была бы вечно зелёной: пустое значение переменной `_env`
+            # заменяет умолчанием, то есть до поля не доходит вовсе. Проверка,
+            # которая не может упасть, не лучше отсутствующей.
+            return str(raw)
+        if self.kind == "bool":
+            if isinstance(raw, bool):
+                return raw
+            raise ValueError(f"{self.label}: значение должно быть да/нет, а не {raw!r}")
+        if self.kind == "choice":
+            value = str(raw).strip()
+            if value not in self.choices:
+                raise ValueError(
+                    f"{self.label}: значение {value!r} не из списка; "
+                    f"допустимо: {', '.join(self.choices)}"
+                )
+            return value
         if self.kind == "text":
             value = str(raw).strip()
+            if not value:
+                if self.allow_empty:
+                    return value
+                raise ValueError(f"{self.label}: значение не должно быть пустым")
             if self.pattern and not re.fullmatch(self.pattern, value):
-                raise ValueError(f"{self.label}: значение {value!r} не подходит по форме")
+                raise ValueError(
+                    f"{self.label}: значение {value!r} не подходит по форме"
+                    + (f" ({self.note})" if self.note else "")
+                )
             return value
         try:
             value = int(raw) if self.kind == "int" else float(raw)
         except (TypeError, ValueError) as exc:
             expected = "целым числом" if self.kind == "int" else "числом"
-            raise ValueError(f"{self.label}: значение должно быть {expected}, а не {raw!r}") from exc
+            raise ValueError(
+                f"{self.label}: значение должно быть {expected}, а не {raw!r}"
+            ) from exc
         if self.low is not None and value < self.low:
             raise ValueError(f"{self.label}: значение {value} меньше допустимого {self.low}")
         if self.high is not None and value > self.high:
@@ -356,8 +401,14 @@ class TurnParameter:
         return value
 
 
-TURN_PARAMETERS: tuple[TurnParameter, ...] = (
-    TurnParameter(
+def _free(field_name: str, env: str, label: str, why: str) -> SettingSpec:
+    """Настройка без замкнутого множества значений — с причиной, а не молчанием."""
+    return SettingSpec(field_name, env, label, "free", note=why)
+
+
+SETTING_SPECS: tuple[SettingSpec, ...] = (
+    # ── параметры хода: правятся из интерфейса ─────────────────────────────
+    SettingSpec(
         "llm_temperature",
         "LLM_TEMPERATURE",
         "температура модели",
@@ -365,10 +416,15 @@ TURN_PARAMETERS: tuple[TurnParameter, ...] = (
         low=-1.0,
         high=2.0,
         note="−1 означает «не передавать параметр серверу вовсе»",
+        editable=True,
     ),
-    TurnParameter("llm_timeout", "LLM_TIMEOUT", "таймаут модели, с", "int", low=5, high=3600),
-    TurnParameter("top_k", "RAG_TOP_K", "фрагментов из отчётов", "int", low=1, high=50),
-    TurnParameter(
+    SettingSpec(
+        "llm_timeout", "LLM_TIMEOUT", "таймаут модели, с", "int", low=5, high=3600, editable=True
+    ),
+    SettingSpec(
+        "top_k", "RAG_TOP_K", "фрагментов из отчётов", "int", low=1, high=50, editable=True
+    ),
+    SettingSpec(
         "min_score",
         "RAG_MIN_SCORE",
         "порог близости",
@@ -376,57 +432,268 @@ TURN_PARAMETERS: tuple[TurnParameter, ...] = (
         low=0.0,
         high=1.0,
         note="ниже порога находка считается непокрытой корпусом и включает веб-поиск",
+        editable=True,
     ),
-    TurnParameter(
+    SettingSpec(
         "report_budget_chars",
         "REPORT_BUDGET_CHARS",
         "бюджет отчётов, знаков",
         "int",
         low=500,
         high=100_000,
+        editable=True,
     ),
-    TurnParameter(
-        "web_budget_chars", "WEB_BUDGET_CHARS", "бюджет веба, знаков", "int", low=0, high=100_000
+    SettingSpec(
+        "web_budget_chars",
+        "WEB_BUDGET_CHARS",
+        "бюджет веба, знаков",
+        "int",
+        low=0,
+        high=100_000,
+        editable=True,
     ),
-    TurnParameter(
+    SettingSpec(
         "fragment_cap_chars",
         "FRAGMENT_CAP_CHARS",
         "потолок одного фрагмента, знаков",
         "int",
         low=200,
         high=50_000,
+        editable=True,
     ),
-    TurnParameter(
+    SettingSpec(
         "history_budget_chars",
         "HISTORY_BUDGET_CHARS",
         "бюджет истории, знаков",
         "int",
         low=0,
         high=100_000,
+        editable=True,
     ),
-    TurnParameter(
+    SettingSpec(
         "history_turn_cap_chars",
         "HISTORY_TURN_CAP_CHARS",
         "потолок одного хода истории, знаков",
         "int",
         low=100,
         high=50_000,
+        editable=True,
     ),
-    TurnParameter("web_results", "WEB_RESULTS", "веб-результатов", "int", low=1, high=50),
-    TurnParameter(
+    SettingSpec(
+        "web_results", "WEB_RESULTS", "веб-результатов", "int", low=1, high=50, editable=True
+    ),
+    SettingSpec(
         "web_region",
         "WEB_REGION",
         "регион веб-поиска",
         "text",
         pattern=r"[a-z]{2}-[a-z]{2}",
         note="две буквы языка и две буквы страны, например ru-ru",
+        editable=True,
     ),
+    # ── параметры корпуса: из интерфейса не правятся, но проверяются ───────
+    #
+    # Правка любого из них делает уже собранный индекс несогласованным с
+    # настройкой, поэтому менять их можно только вместе с пересборкой. Но
+    # ПРОВЕРЯТЬ их надо ровно так же: опечатка здесь портит не один ход, а весь
+    # корпус, и обходится дороже.
+    SettingSpec(
+        "chunk_size", "CHUNK_SIZE", "размер фрагмента, знаков", "int", low=100, high=20_000
+    ),
+    SettingSpec(
+        "chunk_overlap",
+        "CHUNK_OVERLAP",
+        "перекрытие фрагментов, знаков",
+        "int",
+        low=0,
+        high=10_000,
+        note="обязано быть меньше размера фрагмента — см. проверку связей ниже",
+    ),
+    # ── откуда берётся эластичность ───────────────────────────────────────
+    #
+    # ★ЗАМКНУТОЕ МНОЖЕСТВО ИЗ ДВУХ ЗНАЧЕНИЙ, И ЭТО ТОТ САМЫЙ СЛУЧАЙ, РАДИ
+    # КОТОРОГО ПРОВЕРКА ЗАВЕДЕНА. `ELASTICITY_SOURCE=mesured` до этой проверки
+    # молча переключал расчёт на литературные числа: опечатка меняла цифры в
+    # ответе и не говорила ни слова.
+    SettingSpec(
+        "elasticity_source",
+        "ELASTICITY_SOURCE",
+        "откуда берётся эластичность",
+        "choice",
+        choices=("measured", "literature"),
+    ),
+    # ── числа сценарного расчёта ──────────────────────────────────────────
+    #
+    # Эластичности обязаны быть ОТРИЦАТЕЛЬНЫМИ: рост цены снижает потребление.
+    # Положительное значение перевернуло бы знак сценария — подорожание после
+    # сокращения добычи стало бы удешевлением, и выглядело бы это как результат
+    # расчёта, а не как опечатка.
+    SettingSpec(
+        "demand_elasticity_short",
+        "DEMAND_ELASTICITY_SHORT",
+        "эластичность на коротком горизонте",
+        "float",
+        low=-5.0,
+        high=-0.01,
+    ),
+    SettingSpec(
+        "demand_elasticity_long",
+        "DEMAND_ELASTICITY_LONG",
+        "эластичность на длинном горизонте",
+        "float",
+        low=-5.0,
+        high=-0.01,
+    ),
+    SettingSpec(
+        "demand_elasticity_band",
+        "DEMAND_ELASTICITY_BAND",
+        "полоса неопределённости эластичности",
+        "float",
+        low=-5.0,
+        high=-0.01,
+    ),
+    SettingSpec(
+        "elasticity_short_days",
+        "ELASTICITY_SHORT_DAYS",
+        "короткий горизонт, дней",
+        "int",
+        low=1,
+        high=3650,
+    ),
+    SettingSpec(
+        "elasticity_long_days",
+        "ELASTICITY_LONG_DAYS",
+        "длинный горизонт, дней",
+        "int",
+        low=1,
+        high=36_500,
+        note="обязан быть больше короткого — см. проверку связей ниже",
+    ),
+    SettingSpec(
+        "global_supply_mb_d",
+        "GLOBAL_SUPPLY_MB_D",
+        "мировое предложение, млн барр./сут",
+        "float",
+        low=1.0,
+        high=500.0,
+    ),
+    # ── память диалога ────────────────────────────────────────────────────
+    #
+    # ★Проверялось и раньше, но при ПЕРВОМ ИСПОЛЬЗОВАНИИ — то есть система
+    # поднималась, показывала интерфейс и падала на первом же вопросе. Отказ
+    # при старте называет ту же причину на несколько минут раньше и до того,
+    # как человек успел задать вопрос.
+    SettingSpec(
+        "conversation_memory",
+        "CONVERSATION_MEMORY",
+        "память диалога",
+        "choice",
+        choices=("sqlite", "memory", "off"),
+    ),
+    SettingSpec("link_threads", "LINK_THREADS", "подключение разговоров", "bool"),
+    # ── адреса служб ──────────────────────────────────────────────────────
+    SettingSpec(
+        "llm_base_url",
+        "OPENAI_BASE_URL",
+        "адрес модели",
+        "text",
+        pattern=r"https?://\S+",
+        note="адрес вида http://хост:порт/v1",
+    ),
+    SettingSpec(
+        "qdrant_url",
+        "QDRANT_URL",
+        "адрес Qdrant",
+        "text",
+        pattern=r"https?://\S+",
+        allow_empty=True,
+        note="пусто означает встроенный режим и файл на диске",
+    ),
+    # ── свободная форма: проверять нечего, и это сказано вслух ─────────────
+    _free("llm_api_key", "OPENAI_API_KEY", "ключ модели", "ключ бывает любым"),
+    _free("llm_model", "LLM_MODEL", "имя модели", "имя задаёт сервер модели, а не мы"),
+    _free(
+        "embedding_model",
+        "EMBEDDING_MODEL",
+        "модель эмбеддингов",
+        "имя из каталога fastembed; список меняется в библиотеке, а не у нас",
+    ),
+    _free("qdrant_path", "QDRANT_PATH", "каталог Qdrant", "каталог создаётся при первом запуске"),
+    _free("collection", "QDRANT_COLLECTION", "имя коллекции", "имя бывает любым"),
+    # ★Проверяется по списку движков САМОЙ библиотеки и отвечает статусом, а не
+    # падением (см. neftegaz/tools/web.py). Дублировать список здесь значило бы
+    # завести копию, которая отстанет от библиотеки и начнёт врать; ронять же
+    # старт из-за веб-поиска нельзя — система обязана работать по отчётам и без
+    # сети.
+    _free("web_backend", "WEB_BACKEND", "сервис веб-поиска", "сверяется со списком библиотеки"),
+    _free("checkpoint_db", "CHECKPOINT_DB", "файл разговоров", "файл создаётся при первом запуске"),
+    _free("reports_dir", "REPORTS_DIR", "каталог отчётов", "каталог задаёт развёртывание"),
+    _free("prices_csv", "PRICES_CSV", "файл ряда цен", "путь задаёт развёртывание"),
 )
+
+# Параметры хода — ПОДМНОЖЕСТВО реестра, а не отдельный список: границы, по
+# которым интерфейс проверяет введённое, обязаны быть теми же, по которым старт
+# проверяет `.env`.
+TURN_PARAMETERS: tuple[SettingSpec, ...] = tuple(spec for spec in SETTING_SPECS if spec.editable)
 
 _BY_NAME = {parameter.field: parameter for parameter in TURN_PARAMETERS}
 
 
-def turn_parameter(name: str) -> TurnParameter:
+def check_settings(values: Settings) -> list[str]:
+    """Перечислить всё непригодное в настройках. Пустой список — всё в порядке.
+
+    ★ВСЕ находки разом, а не первая. Разворачивающий систему чинит `.env` за
+    один заход, а не запускает её пять раз, узнавая по одной опечатке.
+
+    ★Сообщение называет ИМЯ ПЕРЕМЕННОЙ, а не имя поля. Человек правит `.env`,
+    в котором нет ни `min_score`, ни `conversation_memory`; сообщение, которое
+    нельзя перенести в правку одним движением, — это полсообщения.
+    """
+    problems: list[str] = []
+    for spec in SETTING_SPECS:
+        try:
+            spec.parse(getattr(values, spec.field))
+        except ValueError as exc:
+            problems.append(f"{spec.env} — {exc}")
+
+    # ── связи между полями ────────────────────────────────────────────────
+    #
+    # ★Каждое значение по отдельности пригодно, а пара — нет. Такую пару не
+    # поймает никакая проверка одного поля, а ведёт она себя тихо: перекрытие
+    # больше фрагмента даёт бесконечное нарезание, длинный горизонт меньше
+    # короткого — интерполяцию задом наперёд.
+    if values.chunk_overlap >= values.chunk_size:
+        problems.append(
+            f"CHUNK_OVERLAP: перекрытие {values.chunk_overlap} не меньше размера "
+            f"фрагмента CHUNK_SIZE={values.chunk_size}; нарезка не сдвигалась бы вперёд"
+        )
+    if values.elasticity_long_days <= values.elasticity_short_days:
+        problems.append(
+            f"ELASTICITY_LONG_DAYS: длинный горизонт {values.elasticity_long_days} не больше "
+            f"короткого ELASTICITY_SHORT_DAYS={values.elasticity_short_days}; "
+            "интерполяция эластичности встала бы задом наперёд"
+        )
+    return problems
+
+
+def _check_at_start(values: Settings) -> None:
+    """Отказаться работать на непригодной настройке — при старте, а не потом.
+
+    ★ЦЕНА РЕШЕНИЯ НАЗВАНА: запуск с наполовину заполненным `.env` перестаёт
+    доходить до первого вопроса. Это и есть выигрыш: прежде такой запуск
+    доходил, показывал интерфейс и вёл себя не так, как написано в его же
+    конфигурации.
+    """
+    problems = check_settings(values)
+    if not problems:
+        return
+    raise ValueError(
+        "Настройки непригодны, система не запущена. Что править в .env:\n  - "
+        + "\n  - ".join(problems)
+    )
+
+
+def turn_parameter(name: str) -> SettingSpec:
     if name not in _BY_NAME:
         raise KeyError(
             f"{name!r} не входит в число правимых из интерфейса параметров хода; "
@@ -532,3 +799,10 @@ def _load_saved_overrides() -> None:
 
 
 _load_saved_overrides()
+
+# ★ПРОВЕРКА ЗДЕСЬ, В КОНЦЕ МОДУЛЯ, А НЕ В СБОРКЕ `Settings`. Проверяется то, по
+# чему система будет РАБОТАТЬ: `.env` плюс поднятые правки интерфейса, а не
+# промежуточное состояние. И происходит это при импорте конфигурации, то есть
+# раньше всего остального: ни один вопрос не будет отвечен по настройке, о
+# которой мы знаем, что она непригодна.
+_check_at_start(settings)
