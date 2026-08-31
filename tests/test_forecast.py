@@ -516,3 +516,88 @@ def test_a_scenario_keeps_the_nature_of_the_method_it_shifts():
     assert shifted.kind == base.kind
     assert shifted.flat_point_forecast == base.flat_point_forecast
     assert "Линия прогноза плоская" in shifted.interpretation()
+
+
+# ── откат с ARIMA на сглаживание: читатель узнаёт ПРИЧИНУ (Р-072) ──────────
+
+
+def _steady_series():
+    import pandas as pd
+
+    index = pd.date_range("2026-01-01", periods=150, freq="D", name="date")
+    return pd.Series([70.0 + (i % 7) * 0.4 for i in range(150)], index=index, name="close")
+
+
+def test_a_normal_run_says_nothing_about_a_fallback():
+    """★ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ ИДЁТ ПЕРВЫМ И ВАЖНЕЕ ПОЛОЖИТЕЛЬНОГО.
+
+    Оговорка, звучащая при каждом прогнозе, перестаёт что-либо значить к тому
+    дню, когда повод для неё появится. Поэтому в обычном случае в тексте не
+    должно быть ни причины, ни знака внимания.
+    """
+    from neftegaz.forecast.models import forecast
+
+    result = forecast(_steady_series(), horizon=30, method="auto")
+    assert result.fallback_reason == ""
+    assert "запасной метод" not in result.interpretation()
+
+
+def test_a_failed_fit_names_the_reason_in_the_text(monkeypatch):
+    """Откат меняет ПРИРОДУ ответа: у метода уровня нет слагаемого тренда.
+
+    До этого читатель видел имя отработавшего метода и не мог узнать, почему
+    получил его вместо заказанного автоматического выбора.
+    """
+    import neftegaz.forecast.models as models
+
+    def _refuse(*_args, **_kwargs):
+        raise RuntimeError("подгонка не сошлась")
+
+    monkeypatch.setattr(models, "arima_forecast", _refuse, raising=True)
+    result = models.forecast(_steady_series(), horizon=30, method="auto")
+
+    assert result.fallback_reason == "RuntimeError: подгонка не сошлась"
+    text = result.interpretation()
+    assert "запасной метод" in text
+    assert "подгонка не сошлась" in text, "причина названа коду, но не читателю"
+
+
+def test_the_reason_carries_no_traceback(monkeypatch):
+    """В текст ответа идут тип и сообщение, а не трассировка.
+
+    Трассировка ничего не говорит читателю ответа и выносит наружу пути
+    файловой системы — то есть сведения о машине, на которой всё это крутится.
+    """
+    import neftegaz.forecast.models as models
+
+    def _refuse(*_args, **_kwargs):
+        raise ValueError("первая строка\nвторая строка с /путь/к/файлу.py")
+
+    monkeypatch.setattr(models, "arima_forecast", _refuse, raising=True)
+    result = models.forecast(_steady_series(), horizon=30, method="auto")
+
+    assert result.fallback_reason == "ValueError: первая строка"
+    assert "\n" not in result.fallback_reason
+    assert ".py" not in result.fallback_reason
+
+
+def test_the_reason_survives_the_supply_scenario(monkeypatch):
+    """★Сценарий двигает числа, но не отменяет подмены метода.
+
+    Потеряй мы поле здесь — получили бы сценарный ответ, у которого причина
+    известна коду и неизвестна читателю: ровно тот дефект, который чинится.
+    """
+    import neftegaz.forecast.models as models
+    from neftegaz.tools.forecast_tool import apply_supply_scenario
+
+    monkeypatch.setattr(
+        models,
+        "arima_forecast",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("подгонка не сошлась")),
+        raising=True,
+    )
+    base = models.forecast(_steady_series(), horizon=30, method="auto")
+    shifted = apply_supply_scenario(base, supply_change_mb_d=-1.5, horizon_days=30)
+
+    assert shifted.fallback_reason == base.fallback_reason
+    assert "запасной метод" in shifted.interpretation()

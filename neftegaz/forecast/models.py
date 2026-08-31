@@ -16,7 +16,7 @@ which one ran.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -63,6 +63,14 @@ class ForecastResult:
     # об этом должен читатель, а не только автор кода, поэтому признак типизован
     # и доезжает до текста интерпретации.
     flat_point_forecast: bool = False
+    # ★ПОЧЕМУ ОТРАБОТАЛ НЕ ТОТ МЕТОД, КОТОРЫЙ ПРЕДПОЧИТАЕТСЯ. Режим «auto»
+    # предпочитает ARIMA и при неудаче подгонки берёт сглаживание. Откат меняет
+    # ПРИРОДУ ответа: у модели уровня нет слагаемого тренда, линия становится
+    # плоской, — и до сих пор читатель видел только имя отработавшего метода, а
+    # причину подмены не видел вовсе. Пустая строка значит «откатов не было», и
+    # в этом случае в тексте не появляется ничего: оговорка, звучащая всегда,
+    # перестаёт что-либо значить к тому дню, когда повод появится.
+    fallback_reason: str = ""
 
     def interpretation(self, instrument: str = "Brent") -> str:
         """Один абзац, который человек читает, не открывая таблицу прогноза.
@@ -83,6 +91,17 @@ class ForecastResult:
             if self.flat_point_forecast
             else ""
         )
+        # ★Строка появляется ТОЛЬКО при откате. В обычном прогоне её нет —
+        # иначе читатель перестанет её замечать ровно тогда, когда она важна.
+        fallback = (
+            f" ⚠ Заказан был режим автоматического выбора, в котором предпочитается "
+            f"ARIMA, но подгонка не удалась ({self.fallback_reason}), поэтому "
+            f"отработал запасной метод. Это меняет природу ответа, а не только его "
+            f"числа: смена метода — причина, по которой два прогона по одному и тому "
+            f"же ряду могут разойтись."
+            if self.fallback_reason
+            else ""
+        )
         return (
             f"{instrument}: прогноз {last['forecast']:.2f} долл./барр. на горизонте "
             f"{horizon} дн. ({self.method}, подгонка по {self.n_observations} "
@@ -90,7 +109,7 @@ class ForecastResult:
             f"{width_end:.2f} долл./барр. по мере удаления горизонта: "
             f"неопределённость растёт как корень из времени, поэтому далёкая "
             f"точечная оценка несёт куда меньше сведений, чем ближняя. Разброс "
-            f"остатков {self.residual_sigma:.2f} долл./барр.{flat}"
+            f"остатков {self.residual_sigma:.2f} долл./барр.{flat}{fallback}"
         )
 
 
@@ -327,5 +346,16 @@ def forecast(series: pd.Series, horizon: int, method: str = "auto", **kwargs) ->
 
     try:
         return arima_forecast(series, horizon)
-    except Exception:  # noqa: BLE001 - any fit failure is a fallback trigger
-        return simple_exponential_smoothing(series, horizon)
+    except Exception as exc:  # noqa: BLE001 - any fit failure is a fallback trigger
+        # ★ПРИЧИНА ЕДЕТ В РЕЗУЛЬТАТ, а не гаснет здесь. Откат меняет природу
+        # ответа: у запасного метода нет слагаемого тренда. Читатель видел, что
+        # отработало сглаживание, и не мог узнать, ПОЧЕМУ он получил его вместо
+        # заказанного автоматического выбора.
+        #
+        # В текст идёт тип исключения и его сообщение, а не трассировка: она
+        # ничего не говорит читателю ответа и рискует вынести наружу пути
+        # файловой системы.
+        message = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+        reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+        result = simple_exponential_smoothing(series, horizon)
+        return replace(result, fallback_reason=reason)
