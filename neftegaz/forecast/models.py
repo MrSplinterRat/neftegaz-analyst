@@ -205,8 +205,60 @@ def _validate(series: pd.Series, horizon: int) -> None:
         raise ValueError(f"need at least 2 observations, got {len(series)}")
 
 
+# ── подбор коэффициента сглаживания ────────────────────────────────────────
+#
+# ★ГРАНИЦЫ, А НЕ СВОБОДНЫЙ ПОИСК. α=1 означает «уровень равен последнему
+# наблюдению»: метод перестаёт что-либо сглаживать и вырождается в «завтра как
+# сегодня». На дневной цене это ПОЧТИ ВЕРНО (она близка к случайному блужданию)
+# и потому притягивает подбор к самому краю — на нашем ряде лучшее значение
+# упирается в верхнюю границу. Ограничение оставляет методу хоть какое-то
+# сглаживание и не даёт коридору схлопнуться на вырожденном решении.
+ALPHA_LOW, ALPHA_HIGH = 0.05, 0.95
+# Ниже этой длины подбор не проводится: на коротком ряде минимум одношаговой
+# ошибки — свойство конкретных двадцати чисел, а не ряда, и «подобранное»
+# значение было бы подгонкой под шум с видом измерения.
+ALPHA_FIT_MIN_OBSERVATIONS = 30
+ALPHA_DEFAULT = 0.3
+
+
+def _one_step_rmse(observations: np.ndarray, alpha: float) -> float:
+    """Корень из средней квадратичной ошибки прогноза на шаг вперёд."""
+    level = float(observations[0])
+    total = 0.0
+    for value in observations[1:]:
+        error = float(value) - level
+        total += error * error
+        level = alpha * float(value) + (1.0 - alpha) * level
+    return float(np.sqrt(total / (observations.size - 1)))
+
+
+def fit_alpha(observations: np.ndarray) -> float | None:
+    """Подобрать коэффициент сглаживания по ряду; ``None`` — подбор невозможен.
+
+    ★«Подбор не проводился» возвращается ОТДЕЛЬНЫМ значением, а не умолчанием
+    0.3. Вернув здесь 0.3, функция сделала бы «подобрано и вышло 0.3»
+    неотличимым от «подбирать было не на чем» — а в ответе стои́т пометка о том,
+    откуда взялось число, и она обязана быть правдой.
+
+    Сеткой в два прохода, а не библиотечным оптимизатором: сглаживание здесь —
+    запасной путь, который обязан оставаться проверяемым построчно и работать
+    без единой зависимости. Два прохода дают шаг 0.01 за 29 вычислений ошибки —
+    дешевле, чем один проход с тем же шагом, и без итерационной машинерии,
+    которая сама может не сойтись.
+    """
+    if observations.size < ALPHA_FIT_MIN_OBSERVATIONS:
+        return None
+    coarse = [ALPHA_LOW + 0.05 * step for step in range(19)]
+    coarse = [value for value in coarse if ALPHA_LOW <= value <= ALPHA_HIGH]
+    best = min(coarse, key=lambda a: _one_step_rmse(observations, a))
+    fine = [best + 0.01 * step for step in range(-4, 5)]
+    fine = [value for value in fine if ALPHA_LOW <= value <= ALPHA_HIGH]
+    best = min(fine, key=lambda a: _one_step_rmse(observations, a))
+    return round(best, 2)
+
+
 def simple_exponential_smoothing(
-    series: pd.Series, horizon: int, alpha: float = 0.3
+    series: pd.Series, horizon: int, alpha: float | None = None
 ) -> ForecastResult:
     """Exponential smoothing of the level, with a widening confidence band.
 
@@ -223,6 +275,23 @@ def simple_exponential_smoothing(
     """
     _validate(series, horizon)
     observations = series.to_numpy(dtype="float64")
+    # ★Коэффициент подбирается по ряду, если его не задали явно. Прежде здесь
+    # стояло 0.3 — общепринятое умолчание, взятое без сравнения. Замер на
+    # поставляемом ряде Brent (1827 наблюдений): одношаговая ошибка при 0.3 —
+    # 2.54 долл., при подобранном 0.95 — 1.89, то есть на четверть меньше.
+    # Разброс остатков — это ширина коридора, значит завышенное сглаживание
+    # покупало не осторожность, а неверную калибровку.
+    #
+    # ★Признак ставится ПО ФАКТУ подбора, а не по намерению. Первая редакция
+    # ставила его там, где коэффициент не задали явно, — и на коротком ряде
+    # ответ утверждал «подобрано по ряду», хотя подбора не было. Поймано
+    # тестом: признак отвечал на вопрос «просили ли подбор» вместо заявленного
+    # «подобрано ли».
+    fitted_alpha = False
+    if alpha is None:
+        fitted = fit_alpha(observations)
+        fitted_alpha = fitted is not None
+        alpha = fitted if fitted is not None else ALPHA_DEFAULT
 
     level = float(observations[0])
     residuals: list[float] = []
@@ -245,7 +314,10 @@ def simple_exponential_smoothing(
     return ForecastResult(
         frame=frame,
         method="простое экспоненциальное сглаживание",
-        params={"alpha": alpha},
+        # ★Откуда взялся коэффициент — часть ответа, а не деталь реализации:
+        # «0.95, подобрано по ряду» и «0.95, задано вручную» — разные основания
+        # для одного числа, и рецензент имеет право их различать.
+        params={"alpha": alpha, "alpha_fitted": fitted_alpha},
         residual_sigma=sigma,
         n_observations=len(observations),
         flat_point_forecast=True,

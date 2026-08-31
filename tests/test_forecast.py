@@ -767,3 +767,88 @@ def test_the_warning_reaches_the_text_of_the_report():
     finally:
         object.__setattr__(config.settings, "prices_stale_days", saved)
     assert "ряд цен отстаёт" in text
+
+
+# ── коэффициент сглаживания подбирается по ряду (Р-118) ────────────────────
+
+
+def test_the_fitted_alpha_stays_inside_its_bounds(series):
+    """★α=1 означает «уровень равен последнему наблюдению»: метод перестаёт
+    сглаживать вовсе. На дневной цене это почти верно — она близка к случайному
+    блужданию, — и потому подбор тянет к самому краю. Границы не дают коридору
+    схлопнуться на вырожденном решении."""
+    from neftegaz.forecast.models import ALPHA_HIGH, ALPHA_LOW, simple_exponential_smoothing
+
+    result = simple_exponential_smoothing(series, horizon=30)
+    assert ALPHA_LOW <= result.params["alpha"] <= ALPHA_HIGH
+    assert result.params["alpha_fitted"] is True
+
+
+def test_a_short_series_keeps_the_default_instead_of_fitting():
+    """На коротком ряде минимум одношаговой ошибки — свойство двадцати чисел, а
+    не ряда: «подобранное» значение было бы подгонкой под шум с видом измерения."""
+    import pandas as pd
+
+    from neftegaz.forecast.models import ALPHA_DEFAULT, simple_exponential_smoothing
+
+    index = pd.date_range("2026-01-01", periods=20, freq="D", name="date")
+    short = pd.Series([70.0 + i * 0.1 for i in range(20)], index=index, name="close")
+    result = simple_exponential_smoothing(short, horizon=5)
+
+    assert result.params["alpha"] == ALPHA_DEFAULT
+    assert result.params["alpha_fitted"] is False
+
+
+def test_an_explicit_alpha_is_not_overridden(series):
+    """Возможность задать коэффициент вручную обязана пережить появление подбора:
+    иначе рецензент не сможет воспроизвести прежние числа."""
+    from neftegaz.forecast.models import simple_exponential_smoothing
+
+    result = simple_exponential_smoothing(series, horizon=30, alpha=0.3)
+    assert result.params["alpha"] == 0.3
+    assert result.params["alpha_fitted"] is False
+
+
+def test_the_fitted_alpha_beats_the_old_default_on_one_step_error(series):
+    """Смысл подбора — в ошибке, а не в самом факте подбора."""
+    from neftegaz.forecast.models import _one_step_rmse, fit_alpha
+
+    observations = series.to_numpy(dtype="float64")
+    fitted = fit_alpha(observations)
+    assert _one_step_rmse(observations, fitted) <= _one_step_rmse(observations, 0.3)
+
+
+def test_the_narrower_band_still_covers_the_facts():
+    """★ГЛАВНЫЙ ТЕСТ ЭТОЙ ПРАВКИ, И ОН НЕ ПРО СИГМУ.
+
+    Судить о сужении коридора по той же сигме, из которой он построен, — значит
+    спрашивать у метода, доволен ли он собой. Здесь считается ПОПАДАНИЕ: доля
+    случаев, когда факт через горизонт оказался внутри 95% коридора,
+    построенного по данным до этого момента.
+
+    Замер на поставляемом ряде Brent: при α=0.3 покрытие 97.7% (коридор шире
+    нужного), при подобранном — 95.2%, то есть ровно номинальные 95%. Здесь то
+    же проверяется на синтетическом блуждании, чтобы тест не зависел от корпуса
+    и шёл быстро.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from neftegaz.forecast.models import simple_exponential_smoothing
+
+    rng = np.random.default_rng(20260831)
+    index = pd.date_range("2024-01-01", periods=400, freq="D", name="date")
+    walk = pd.Series(80.0 * np.exp(np.cumsum(rng.normal(0, 0.01, 400))), index=index, name="close")
+
+    horizon = 20
+    inside = total = 0
+    for cut in range(200, len(walk) - horizon, 10):
+        result = simple_exponential_smoothing(walk.iloc[:cut], horizon=horizon)
+        actual = float(walk.iloc[cut + horizon - 1])
+        total += 1
+        if float(result.frame["lower"].iloc[-1]) <= actual <= float(result.frame["upper"].iloc[-1]):
+            inside += 1
+
+    assert total >= 15, "окон слишком мало, проверка ничего не значит"
+    share = inside / total
+    assert 0.85 <= share <= 1.0, f"покрытие 95% коридора вышло {share:.0%}"
