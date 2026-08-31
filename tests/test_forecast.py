@@ -601,3 +601,76 @@ def test_the_reason_survives_the_supply_scenario(monkeypatch):
 
     assert shifted.fallback_reason == base.fallback_reason
     assert "запасной метод" in shifted.interpretation()
+
+
+# ── несошедшаяся подгонка видна читателю, а не только коду (Р-078) ─────────
+
+
+def test_a_failed_convergence_is_named_in_the_text():
+    """★Худший вид отказа — тот, что молчит.
+
+    Оптимизатор не бросает исключения: подгонка обрывается, а числа выглядят
+    как обычный ответ. Признак давно ехал в параметрах результата, то есть был
+    доступен разработчику и невидим читателю.
+
+    Ряд взят НАСТОЯЩИЙ, а не подделанный: на плоской линии подгонка ARIMA
+    действительно не сходится, и проверять это на выдуманном объекте значило бы
+    проверять свою же заглушку.
+    """
+    import warnings
+
+    import pandas as pd
+
+    from neftegaz.forecast.models import arima_forecast
+
+    index = pd.date_range("2026-01-01", periods=120, freq="D", name="date")
+    flat = pd.Series([70.0] * 120, index=index, name="close")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = arima_forecast(flat, horizon=10)
+
+    assert result.params["converged"] is False
+    assert "НЕ СОШЛАСЬ" in result.interpretation()
+
+
+def test_a_converged_fit_says_nothing_about_convergence(series):
+    """★Отрицательный контроль: при обычной подгонке оговорки нет."""
+    from neftegaz.forecast.models import arima_forecast
+
+    result = arima_forecast(series, horizon=30)
+    assert result.params["converged"] is True
+    assert "НЕ СОШЛАСЬ" not in result.interpretation()
+
+
+def test_a_method_without_convergence_says_nothing_either(series):
+    """У сглаживания сходимости нет как понятия — и молчание тут верное.
+
+    Признак читается через `params.get`, поэтому отсутствие ключа не
+    превращается в тревогу. Проверяется отдельно: разница между «не сошлось» и
+    «понятия не существует» видна только так.
+    """
+    from neftegaz.forecast.models import simple_exponential_smoothing
+
+    result = simple_exponential_smoothing(series, horizon=30)
+    assert "converged" not in result.params
+    assert "НЕ СОШЛАСЬ" not in result.interpretation()
+
+
+def test_the_convergence_flag_survives_the_supply_scenario():
+    """Сценарий пересобирает параметры — признак обязан пережить пересборку."""
+    import warnings
+
+    import pandas as pd
+
+    from neftegaz.forecast.models import arima_forecast
+    from neftegaz.tools.forecast_tool import apply_supply_scenario
+
+    index = pd.date_range("2026-01-01", periods=120, freq="D", name="date")
+    flat = pd.Series([70.0] * 120, index=index, name="close")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        base = arima_forecast(flat, horizon=30)
+    shifted = apply_supply_scenario(base, supply_change_mb_d=-1.5, horizon_days=30)
+
+    assert shifted.params["converged"] is False
+    assert "НЕ СОШЛАСЬ" in shifted.interpretation()
