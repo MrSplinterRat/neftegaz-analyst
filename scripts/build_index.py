@@ -17,6 +17,7 @@ import time
 sys.path.insert(0, ".")
 
 from neftegaz.config import settings  # noqa: E402
+from neftegaz.rag.index_stamp import write_stamp  # noqa: E402
 from neftegaz.rag.ingest import ingest_directory  # noqa: E402
 from neftegaz.rag.store import get_store  # noqa: E402
 
@@ -84,7 +85,15 @@ def main() -> int:
 
     print()
     print(f"Всего {total} чанков за {elapsed:.1f} с")
-    print(f"В коллекции сейчас: {get_store().count()} точек")
+    in_store = get_store().count()
+    print(f"В коллекции сейчас: {in_store} точек")
+    # ★Правила сборки записываются РЯДОМ С ИНДЕКСОМ. Модель эмбеддингов, размер
+    # фрагмента и перекрытие описывают сам индекс, а не поведение: поменяв их
+    # без пересборки, вы получите систему, которая уверенно отвечает из индекса,
+    # собранного по другим правилам. Отметка позволяет интерфейсу это заметить
+    # и сказать вслух.
+    stamp = write_stamp(in_store)
+    print(f"Правила сборки записаны: {stamp}")
     return 0
 
 

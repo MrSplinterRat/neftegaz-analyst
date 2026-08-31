@@ -121,6 +121,12 @@ class AgentState(TypedDict, total=False):
     # польза повторного использования — в НАЙДЕННОМ, а процитированное и так
     # стои́т в ответе. Едут ТОЛЬКО идентификаторы, никогда не текст ответа.
     fed_chunk_ids: list[str]
+    # Чем на самом деле был заполнен контекст последнего хода, в знаках:
+    # {"reports": …, "history": …, "web": …, "forecast": …, "budget": …}.
+    # ★Настройка без показанного эффекта — мёртвое число: «бюджет 8000» ничего
+    # не говорит, а «подано 5300 из 8000: отчёты 3900, история 1100, веб 300»
+    # отвечает на вопрос «почему модель не увидела фрагмент» без чтения кода.
+    context_used: dict
     # Идентификаторы из ПОДКЛЮЧЁННЫХ разговоров, собранные до запуска графа.
     # Оттуда приезжают только ссылки на отчёты и НИ ОДНОГО утверждения модели,
     # поэтому круговая ссылка невозможна по устройству.
@@ -791,6 +797,19 @@ def node_answer(state: AgentState) -> AgentState:
         "answer": answer,
         "history": [{"question": question, "answer": answer}],
         "fed_chunk_ids": fed_chunk_ids,
+        # Замер берётся с тех самых строк, которые ушли в промпт, а не
+        # пересчитывается по правилам: прибор зовёт тракт, а не повторяет его.
+        "context_used": {
+            "reports": len(report_context),
+            "history": len(history_context),
+            "web": len(web_context),
+            "forecast": len(forecast_text),
+            "reports_budget": REPORT_BUDGET_CHARS,
+            "web_budget": WEB_BUDGET_CHARS,
+            "history_budget": settings.history_budget_chars,
+            "fragments_found": len(hits),
+            "fragments_fed": len(fed_chunk_ids),
+        },
     }
 
 

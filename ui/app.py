@@ -428,6 +428,147 @@ def panel_search() -> None:
             st.rerun()
 
 
+def panel_settings() -> None:
+    """Настройки, разложенные по тому, ЧТО ИМЕННО они портят.
+
+    ★Разложение важнее списка. Температура и число веб-результатов меняют
+    следующий ответ и ничего не ломают. Модель эмбеддингов и размер фрагмента
+    меняют САМ ИНДЕКС: система продолжит отвечать уверенно, но из индекса,
+    собранного по другим правилам. Показать их вперемешку значило бы сделать
+    вторые такими же безобидными на вид, как первые.
+    """
+    st.markdown("### ⚙️ Настройки")
+
+    used = (st.session_state.get("last_state") or {}).get("context_used") or {}
+    if used:
+        st.markdown("**Чем был заполнен контекст последнего вопроса**")
+        # ★Не «бюджет 7000», а сколько из него ушло и на что. Мёртвое число не
+        # отвечает на вопрос «почему модель не увидела фрагмент», а это —
+        # отвечает, и без чтения кода.
+        st.markdown(
+            f"- отчёты: **{used.get('reports', 0)}** из {used.get('reports_budget', 0)} знаков "
+            f"(фрагментов подано {used.get('fragments_fed', 0)} "
+            f"из {used.get('fragments_found', 0)} найденных)\n"
+            f"- история разговора: **{used.get('history', 0)}** "
+            f"из {used.get('history_budget', 0)}\n"
+            f"- веб: **{used.get('web', 0)}** из {used.get('web_budget', 0)}\n"
+            f"- расчётный модуль: **{used.get('forecast', 0)}**"
+        )
+    else:
+        st.caption("Задайте вопрос — здесь появится, чем именно был заполнен контекст.")
+
+    st.markdown("---")
+    st.markdown("**Параметры хода** — действуют со следующего вопроса, ничего не ломают")
+    # ★«температура -1.0» — мёртвое число: отрицательного значения у температуры
+    # не бывает, это наш признак «не передавать параметр серверу вовсе» (нужен
+    # моделям, которые отвергают запрос с температурой целиком). Показывать его
+    # как число значит требовать от читателя знания нашего кода.
+    temperature = (
+        "не передаётся серверу (модель отвергает этот параметр)"
+        if settings.llm_temperature < 0
+        else f"`{settings.llm_temperature}`"
+    )
+    st.markdown(
+        f"- температура модели {temperature}, "
+        f"таймаут `{settings.llm_timeout}` с\n"
+        f"- фрагментов из отчётов `RAG_TOP_K = {settings.top_k}`, "
+        f"порог близости `RAG_MIN_SCORE = {settings.min_score}`\n"
+        f"- веб-результатов `{settings.web_results}`, регион `{settings.web_region}`\n"
+        f"- бюджет истории `{settings.history_budget_chars}` знаков, "
+        f"ход обрезается до `{settings.history_turn_cap_chars}`"
+    )
+
+    st.markdown("**Параметры разговора** — живут при нити, а не глобально")
+    st.markdown(
+        f"- память диалога `{settings.conversation_memory}`\n"
+        f"- подключение разговоров источниками "
+        f"`LINK_THREADS = {'включено' if settings.link_threads else 'выключено'}` — "
+        "выключено, потому что отрицательный контроль меры не пройден (ОТЧЁТ.md, 3.15б)"
+    )
+
+    st.markdown("**★Параметры корпуса** — их правка делает индекс несогласованным")
+    st.markdown(
+        f"- модель эмбеддингов `{settings.embedding_model}`\n"
+        f"- размер фрагмента `{settings.chunk_size}`, перекрытие `{settings.chunk_overlap}`\n"
+        f"- коллекция `{settings.collection}`"
+    )
+    _render_index_stamp()
+
+    st.markdown("---")
+    st.markdown("**Ключи и секреты**")
+    key = (settings.llm_api_key or "").strip()
+    placeholder = key in {"", "not-needed-for-local"}
+    st.markdown(
+        f"- ключ языковой модели: **{'не задан (локальная модель)' if placeholder else 'задан'}**"
+    )
+    # ★Значение ключа не показывается никогда и ни в каком виде. Панель
+    # настроек — самое естественное место, чтобы секрет утёк в скриншот.
+    st.caption("Значения секретов в интерфейсе не показываются ни при каких настройках.")
+
+    st.markdown("---")
+    st.markdown("**Исходящий трафик**")
+    st.caption(
+        "Система предлагается как локальная, поэтому список того, что уходит наружу, "
+        "должен быть виден, а не выясняться сниффером. Адреса и ключи здесь не "
+        "показываются — только состояние."
+    )
+    st.markdown(
+        f"| куда | зачем | когда | состояние |\n|---|---|---|---|\n"
+        f"| языковая модель | сам ответ | каждый вопрос | "
+        f"{'локальная' if '127.0.0.1' in settings.llm_base_url else 'внешний endpoint'} |\n"
+        f"| DuckDuckGo (ddgs) | веб-поиск | когда отчётов не хватило | включено |\n"
+        f"| Yahoo Finance (yfinance) | история цен Brent | обновление котировок | "
+        f"по запуску скрипта |\n"
+        f"| HuggingFace (fastembed) | модель эмбеддингов, 241 МБ | первый запуск | "
+        f"{'модель уже загружена' if _embedding_model_cached() else 'потребуется загрузка'} |"
+    )
+    st.caption(
+        "Проверка не флагом, а прогоном: `docker run --network none …` — "
+        "система поднимается, ищет по отчётам и считает прогноз из кэша цен, "
+        "а недоступность модели называет первой строкой ответа."
+    )
+
+
+def _embedding_model_cached() -> bool:
+    """Лежит ли модель эмбеддингов на диске — то есть нужна ли загрузка."""
+    cache = os.getenv("FASTEMBED_CACHE_PATH", "")
+    if not cache:
+        return False
+    try:
+        return any(Path(cache).iterdir())
+    except OSError:
+        return False
+
+
+def _render_index_stamp() -> None:
+    """Метка рассогласования индекса с настройкой — и она не гаснет сама."""
+    from neftegaz.rag.index_stamp import mismatches, read_stamp
+
+    stamp = read_stamp()
+    if stamp is None:
+        st.warning(
+            "Правила сборки индекса неизвестны: отметки рядом с хранилищем нет. "
+            "Это не значит «расхождений нет» — значит, сравнить не с чем. "
+            "Пересоберите индекс (`python scripts/build_index.py`), чтобы отметка появилась."
+        )
+        return
+    diff = mismatches()
+    if not diff:
+        st.success(
+            f"Индекс собран по текущим правилам "
+            f"({stamp.get('chunks', '?')} фрагментов, {str(stamp.get('built_at', ''))[:16]})."
+        )
+        return
+    lines = "\n".join(f"- `{name}`: индекс собран с `{was}`, сейчас `{now}`" for name, was, now in diff)
+    st.error(
+        "★ИНДЕКС НЕ СОГЛАСОВАН С НАСТРОЙКОЙ. Ответы идут из индекса, собранного "
+        "по другим правилам, и выглядят при этом совершенно обычно.\n\n"
+        f"{lines}\n\n"
+        "Метка не исчезнет сама — она исчезнет пересборкой: "
+        "`python scripts/build_index.py --recreate`."
+    )
+
+
 def panel_corpus() -> None:
     """Корпус отчётов: какие файлы лежат в основе ответов."""
     st.markdown("### 📄 Корпус отчётов")
@@ -487,6 +628,7 @@ PANELS: dict[str, tuple[str, str, object]] = {
     "sources": ("📚", "Источники ответа", panel_sources),
     "conversation": ("💬", "Разговоры", panel_conversation),
     "search": ("🔎", "Поиск по разговорам", panel_search),
+    "settings": ("⚙️", "Настройки", panel_settings),
     "corpus": ("📄", "Корпус отчётов", panel_corpus),
     "forecast": ("📈", "Расчётный модуль", panel_forecast),
 }
