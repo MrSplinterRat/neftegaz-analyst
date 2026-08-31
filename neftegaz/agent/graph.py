@@ -839,7 +839,7 @@ def node_answer(state: AgentState) -> AgentState:
 
     try:
         answer = ask(
-            prompts.SYSTEM_PROMPT,
+            prompts.system_prompt(),
             prompts.build_answer_prompt(
                 question,
                 report_context,
@@ -929,11 +929,16 @@ def node_clarify(state: AgentState) -> AgentState:
 def node_out_of_scope(state: AgentState) -> AgentState:
     # Отказ — тоже ход разговора: без него следующее «а почему?» повисает в
     # воздухе, потому что модель не видит, на что отвечала.
+    #
+    # ★Реплика берётся ВЫЗОВОМ, а не из константы: заказчик вправе задать свою
+    # (OUT_OF_SCOPE_FILE), и подстановка на импорте закрепила бы то значение,
+    # какое было в момент загрузки модуля.
+    reply = prompts.out_of_scope_reply()
     return {
-        "answer": prompts.OUT_OF_SCOPE_REPLY,
+        "answer": reply,
         "used_reports": False,
         "used_web": False,
-        "history": [{"question": state["question"], "answer": prompts.OUT_OF_SCOPE_REPLY}],
+        "history": [{"question": state["question"], "answer": reply}],
     }
 
 

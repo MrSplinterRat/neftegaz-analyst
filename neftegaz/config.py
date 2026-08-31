@@ -321,6 +321,18 @@ class Settings:
     # читатель, глядя на дату в строке отчёта.
     prices_stale_days: int = field(default_factory=lambda: _env_int("PRICES_STALE_DAYS", 7))
 
+    # ── тексты, принадлежащие заказчику ───────────────────────────────────
+    #
+    # Роль, область экспертизы, требования к стилю и реплика отказа — предмет
+    # редакционной политики заказчика: тон общения принадлежит ему. Пустое
+    # значение означает «наш текст», и это умолчание, а не заглушка.
+    #
+    # ★Правила при отсутствии данных сюда НЕ входят и заменены быть не могут:
+    # на них стои́т сверка цитат и весь раздел о проверяемости. Они
+    # приклеиваются кодом к любому тексту роли — см. `neftegaz/agent/prompts.py`.
+    system_prompt_file: str = field(default_factory=lambda: _env("SYSTEM_PROMPT_FILE", ""))
+    out_of_scope_file: str = field(default_factory=lambda: _env("OUT_OF_SCOPE_FILE", ""))
+
 
 settings = Settings()
 # Снимок того, что говорят `.env` и умолчания, — БЕЗ правок из интерфейса.
@@ -353,6 +365,15 @@ env_settings = Settings()
 # забыли» видна только тогда, когда первое написано вслух.
 
 
+# Потолок для текстов, которые заказчик подставляет вместо наших. Взят с
+# десятикратным запасом к нашим собственным (роль и стиль — 1014 знаков, реплика
+# отказа — 394): запас на подробную редакционную политику есть, а файл, взятый
+# по ошибке (скажем, выгрузка отчёта), отвергается. ★Текст роли едет в КАЖДЫЙ
+# запрос к модели, поэтому его длина — вопрос не аккуратности, а бюджета
+# контекста: он вытесняет отчёты, ради которых запрос и делается.
+MAX_PROMPT_TEXT_CHARS = 10_000
+
+
 @dataclass(frozen=True)
 class SettingSpec:
     """Одна настройка: имя поля, имя в `.env` и то, что считается пригодным."""
@@ -360,7 +381,7 @@ class SettingSpec:
     field: str
     env: str
     label: str
-    kind: str  # "int" | "float" | "text" | "choice" | "bool" | "free"
+    kind: str  # "int" | "float" | "text" | "choice" | "bool" | "textfile" | "free"
     low: float | None = None
     high: float | None = None
     pattern: str | None = None
@@ -398,6 +419,31 @@ class SettingSpec:
                     f"допустимо: {', '.join(self.choices)}"
                 )
             return value
+        if self.kind == "textfile":
+            # Путь к файлу с текстом, который заказчик пишет вместо нашего.
+            # Пусто — законное значение: оно означает «взять наш текст».
+            path_text = str(raw).strip()
+            if not path_text:
+                return path_text
+            candidate = Path(path_text)
+            if not candidate.is_file():
+                raise ValueError(f"{self.label}: файла {path_text!r} нет или это не файл")
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ValueError(f"{self.label}: файл {path_text!r} не читается ({exc})") from exc
+            if not content.strip():
+                # ★Пустой файл — это отказ, а не «текста нет». Молчаливый
+                # переход к умолчанию дал бы заказчику нашу роль вместо его
+                # собственной, и он не узнал бы об этом никогда.
+                raise ValueError(f"{self.label}: файл {path_text!r} пуст")
+            if len(content) > MAX_PROMPT_TEXT_CHARS:
+                raise ValueError(
+                    f"{self.label}: в файле {path_text!r} {len(content)} знаков при потолке "
+                    f"{MAX_PROMPT_TEXT_CHARS}; текст роли едет в КАЖДЫЙ запрос и вытеснил бы "
+                    "из контекста сами отчёты"
+                )
+            return path_text
         if self.kind == "text":
             value = str(raw).strip()
             if not value:
@@ -669,6 +715,20 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         low=0,
         high=3650,
         note="0 выключает предупреждение об устаревшем ряде",
+    ),
+    SettingSpec(
+        "system_prompt_file",
+        "SYSTEM_PROMPT_FILE",
+        "файл с текстом роли и стиля",
+        "textfile",
+        note="пусто означает наш текст; правила при отсутствии данных не заменяются",
+    ),
+    SettingSpec(
+        "out_of_scope_file",
+        "OUT_OF_SCOPE_FILE",
+        "файл с репликой отказа вне компетенции",
+        "textfile",
+        note="пусто означает нашу реплику",
     ),
 )
 
