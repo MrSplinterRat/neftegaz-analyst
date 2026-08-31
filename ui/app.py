@@ -30,6 +30,10 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from neftegaz.agent.graph import answer_question, new_thread_id  # noqa: E402
+from neftegaz.agent.threads import (  # noqa: E402
+    get_registry,
+    registry_unavailable_reason,
+)
 from neftegaz.config import settings  # noqa: E402
 
 st.set_page_config(
@@ -212,31 +216,121 @@ def panel_sources() -> None:
             st.markdown(f"[{hit.url}]({hit.url})")
 
 
+def start_new_thread() -> None:
+    """Новый идентификатор, а не очистка хранилища.
+
+    Прежний разговор остаётся на месте и теперь ДОСТИЖИМ: он есть в реестре, и
+    к нему можно вернуться. До реестра «начать заново» означало «потерять».
+    """
+    st.session_state.thread_id = new_thread_id()
+    st.session_state.history = []
+    st.session_state.last_state = {}
+
+
+def open_thread(thread_id: str) -> None:
+    """Переключиться на разговор и поднять его ходы из базы.
+
+    ★Ходы читаются из реестра, а не из состояния браузера: в другой вкладке их
+    не было бы вовсе, а после перезапуска не было бы нигде.
+    """
+    registry = get_registry()
+    st.session_state.thread_id = thread_id
+    st.session_state.history = (
+        [{"question": t["question"], "answer": t["answer"]} for t in registry.turns(thread_id)]
+        if registry
+        else []
+    )
+    st.session_state.last_state = {}
+
+
 def panel_conversation() -> None:
-    """Разговор: где он хранится и как начать новый."""
-    st.markdown("### 💬 Разговор")
+    """Разговоры: список, переключение, переименование, удаление."""
+    st.markdown("### 💬 Разговоры")
+
     memory_labels = {
         "memory": "в памяти процесса — перезапуск стирает",
         "sqlite": f"в файле `{settings.checkpoint_db}` — переживает перезапуск",
         "off": "выключена — каждый вопрос с чистого листа",
     }
     mode = settings.conversation_memory.strip().lower()
-    st.markdown(f"**Память диалога**\n\n{memory_labels.get(mode, mode)}")
     st.caption(
+        f"память диалога: {memory_labels.get(mode, mode)}; "
         f"бюджет истории {settings.history_budget_chars} знаков, "
         f"ход обрезается до {settings.history_turn_cap_chars}"
     )
 
-    st.markdown(f"**Текущий разговор**\n\n`{st.session_state.get('thread_id', '—')}`")
-    st.caption(f"ходов в этом окне: {len(st.session_state.get('history', []))}")
-
-    if st.button("Начать разговор заново", use_container_width=True):
-        # Новый идентификатор, а не очистка хранилища: прежний разговор
-        # остаётся на месте, а этот начинается с чистого листа.
-        st.session_state.thread_id = new_thread_id()
-        st.session_state.history = []
-        st.session_state.last_state = {}
+    if st.button("➕ Новый разговор", use_container_width=True):
+        start_new_thread()
         st.rerun()
+
+    reason = registry_unavailable_reason()
+    if reason:
+        # Выключенный список обязан объяснять себя: молчащая панель
+        # неотличима от сломанной.
+        st.info(reason)
+        st.markdown(f"**Текущий разговор**\n\n`{st.session_state.get('thread_id', '—')}`")
+        st.caption(f"ходов в этом окне: {len(st.session_state.get('history', []))}")
+        return
+
+    registry = get_registry()
+    current = st.session_state.get("thread_id", "")
+    threads = registry.list_threads()
+
+    if not threads:
+        st.caption("Разговоров пока нет — задайте первый вопрос.")
+        return
+
+    st.markdown("---")
+    for info in threads:
+        active = info.thread_id == current
+        row, trash = st.columns([5, 1], gap="small")
+        label = ("● " if active else "") + info.title
+        if row.button(
+            label,
+            key=f"thread_open_{info.thread_id}",
+            use_container_width=True,
+            type="primary" if active else "secondary",
+            help=f"{info.turns} ход(ов), последний {info.updated_at[:16].replace('T', ' ')}",
+        ):
+            open_thread(info.thread_id)
+            st.rerun()
+        if trash.button("🗑", key=f"thread_del_{info.thread_id}", help="Удалить разговор"):
+            # Подтверждение отдельным ходом: удаление настоящее и необратимое,
+            # а промах по кнопке в узкой панели стои́т одного клика.
+            st.session_state.pending_delete = info.thread_id
+            st.rerun()
+
+    pending = st.session_state.get("pending_delete", "")
+    if pending:
+        doomed = registry.get(pending)
+        st.warning(f"Удалить «{doomed.title if doomed else pending}» вместе со всеми ходами?")
+        yes, no = st.columns(2)
+        if yes.button("Удалить", key="thread_del_yes", use_container_width=True):
+            registry.delete(pending)
+            st.session_state.pending_delete = ""
+            if pending == current:
+                start_new_thread()
+            st.rerun()
+        if no.button("Отмена", key="thread_del_no", use_container_width=True):
+            st.session_state.pending_delete = ""
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("**Переименовать текущий**")
+    known = registry.get(current)
+    new_title = st.text_input(
+        "Название разговора",
+        value=known.title if known else "",
+        key="thread_rename_field",
+        label_visibility="collapsed",
+        placeholder="разговор начнётся с первого вопроса",
+        disabled=known is None,
+    )
+    if st.button("Переименовать", use_container_width=True, disabled=known is None):
+        if registry.rename(current, new_title):
+            st.rerun()
+        else:
+            st.warning("Название не может быть пустым.")
 
 
 def panel_corpus() -> None:
@@ -388,6 +482,13 @@ def render_chat() -> None:
             st.caption("Источники: " + " · ".join(badges) + " — подробности в панели 📚")
 
     st.session_state.history.append({"question": question, "answer": answer})
+    # ★Ход записывает ИНТЕРФЕЙС, а не answer_question. Реестр — это разговоры
+    # пользователя, а не журнал вызовов функции: запись внутри агента заводила
+    # бы «разговор» на каждый тест и каждый пакетный прогон, и список открылся
+    # бы сотней безымянных строк (замер 31.08: в чекпойнтере их накопилось 96).
+    registry = get_registry()
+    if registry is not None:
+        registry.record_turn(st.session_state.thread_id, question, answer)
     # Последнее состояние живёт отдельно от списка ходов: панель источников
     # показывает, чем отвечен ПОСЛЕДНИЙ вопрос, и хранить ради этого найденные
     # фрагменты всех прошлых ходов незачем.
