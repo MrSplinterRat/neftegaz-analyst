@@ -15,9 +15,11 @@ import pytest
 
 from neftegaz.agent import threads
 from neftegaz.agent.threads import (
+    HISTORY_CAP,
     TITLE_CAP,
     ThreadRegistry,
     default_title,
+    fts_query,
     registry_unavailable_reason,
 )
 
@@ -200,3 +202,182 @@ def test_an_enabled_registry_gives_no_reason(monkeypatch):
         threads, "settings", replace(threads.settings, conversation_memory="sqlite")
     )
     assert registry_unavailable_reason() == ""
+
+
+# ── сквозной поиск по разговорам (Ш5) ─────────────────────────────────────
+
+
+ANSWER_US = (
+    "По июльскому отчёту EIA добычи нефти в США вырастет до 13.6 млн барр./сут "
+    "в 2027 году, при этом сокращения ОПЕК+ удержат котировки Brent выше 70."
+)
+ANSWER_GAS = "Запасы газа в Европе заполнены на 90%, спрос на СПГ снижается второй квартал."
+
+
+@pytest.fixture
+def filled(registry):
+    registry.record_turn("t-us", "Что с добычей в США?", ANSWER_US)
+    registry.record_turn("t-gas", "А газ?", ANSWER_GAS)
+    return registry
+
+
+def test_the_query_builder_refuses_what_it_cannot_search():
+    assert fts_query("  ") == ""
+    assert fts_query("на") == "", "слово короче трёх букв триграммам не с чем сопоставлять"
+
+
+def test_the_query_builder_quotes_every_word_separately():
+    assert fts_query("прогноз добычи") == '"прогн" "добы"'
+
+
+def test_a_word_from_the_middle_of_the_answer_is_found(filled):
+    found = filled.search_turns("котировки")
+    assert [h.thread_id for h in found] == ["t-us"]
+    assert found[0].question == "Что с добычей в США?"
+
+
+@pytest.mark.parametrize(
+    ("query", "form_in_text"),
+    [
+        ("добыча", "добычи"),
+        ("сокращение", "сокращения"),
+        ("запас", "Запасы"),
+        ("кварталы", "квартал"),
+    ],
+)
+def test_a_different_russian_word_form_still_finds_the_turn(filled, query, form_in_text):
+    """★Ровно то, ради чего взят trigram И срезка хвоста.
+
+    Голый триграммный MATCH ищет ПОДСТРОКУ, поэтому «добыча» не нашло бы
+    «добычи»: одна форма не входит в другую. Проверка идёт по обеим половинам —
+    и токенизатору, и построителю запроса.
+    """
+    assert any(form_in_text in (h.answer + h.question) for h in filled.search_turns(query))
+
+
+def test_the_known_limit_of_tail_trimming_is_stated_and_not_pretended_away(filled):
+    """★ГРАНИЦА ПРИЁМА, записанная тестом, а не умолчанием.
+
+    Срезка хвоста ловит склонение («добыча» → «добычи»), но не спряжение с
+    основой, которой в тексте нет: у «снижаться» после срезки остаётся
+    «снижат», а в «снижается» стои́т «снижае». Настоящий стеммер это взял бы,
+    и он же стои́т отдельной зависимостью ради одного поля.
+
+    Тест закрепляет ИЗВЕСТНЫЙ промах, чтобы он не выглядел неизвестным. Если
+    когда-нибудь появится морфология, этот тест упадёт — и это будет верный
+    сигнал, а не поломка.
+    """
+    assert filled.search_turns("снижаться") == []
+    assert "снижается" in ANSWER_GAS, "слово в тексте есть — не находит именно приём"
+
+
+def test_a_query_that_is_not_there_finds_nothing(filled):
+    """Отрицательный контроль: пусто, а не «что-нибудь похожее»."""
+    assert filled.search_turns("дивиденды Роснефти") == []
+    assert filled.search_turns("борщ") == []
+
+
+def test_search_spans_every_conversation(filled):
+    assert {h.thread_id for h in filled.search_turns("а")} == set(), "слишком короткий запрос"
+    both = filled.search_turns("нефт")
+    assert {h.thread_id for h in both} == {"t-us"}
+
+
+def test_a_hit_carries_the_conversation_it_came_from(filled):
+    filled.rename("t-us", "США и ОПЕК+")
+    hit = filled.search_turns("котировки")[0]
+    assert hit.thread_title == "США и ОПЕК+"
+    assert hit.ordinal == 1
+
+
+def test_deleting_a_thread_takes_it_out_of_search_too(filled):
+    """«Удалено» обязано значить удалено и для поиска, а не «скрыто из списка»."""
+    filled.delete("t-us")
+    assert filled.search_turns("котировки") == []
+
+
+def test_search_survives_a_restart(filled):
+    fresh = reopen(filled)
+    try:
+        assert len(fresh.search_turns("котировки")) == 1
+    finally:
+        fresh.close()
+
+
+def test_an_index_that_lost_its_rows_is_rebuilt_on_open(filled):
+    """Индекс, разошедшийся с ходами, не падает — он молча ничего не находит.
+
+    Поэтому расхождение ловится счётчиком при открытии и лечится пересборкой.
+    """
+    filled._db.execute("INSERT INTO turns_fts (turns_fts) VALUES ('delete-all')")
+    filled._db.commit()
+    assert filled.search_turns("котировки") == [], "подготовка: индекс действительно опустошён"
+    fresh = reopen(filled)
+    try:
+        assert len(fresh.search_turns("котировки")) == 1
+    finally:
+        fresh.close()
+
+
+# ── история поиска (Ш6) ───────────────────────────────────────────────────
+
+
+def test_a_repeated_query_lifts_the_existing_row(registry):
+    registry.record_search("добыча США", 3)
+    registry.record_search("газ", 1)
+    registry.record_search("добыча США", 5)
+    history = registry.list_searches()
+    assert [r.query for r in history] == ["добыча США", "газ"]
+    assert history[0].hits == 5, "число найденного обновляется, а не остаётся прежним"
+
+
+def test_history_survives_a_restart(registry):
+    registry.record_search("добыча США", 3)
+    fresh = reopen(registry)
+    try:
+        assert [r.query for r in fresh.list_searches()] == ["добыча США"]
+    finally:
+        fresh.close()
+
+
+def test_deleting_one_history_item_really_removes_the_row(registry):
+    registry.record_search("добыча США", 3)
+    registry.record_search("газ", 1)
+    assert registry.forget_search("газ") is True
+    fresh = reopen(registry)
+    try:
+        left = fresh._db.execute("SELECT count(*) FROM search_history WHERE query = 'газ'")
+        assert left.fetchone()[0] == 0, "строка обязана уйти из базы, а не пометиться"
+        assert [r.query for r in fresh.list_searches()] == ["добыча США"]
+    finally:
+        fresh.close()
+
+
+def test_forgetting_a_query_that_is_not_there_reports_failure(registry):
+    assert registry.forget_search("такого не искали") is False
+
+
+def test_clearing_history_empties_it(registry):
+    registry.record_search("один", 1)
+    registry.record_search("два", 2)
+    assert registry.clear_searches() == 2
+    assert registry.list_searches() == []
+
+
+def test_history_is_capped_and_evicts_the_oldest(registry):
+    for i in range(HISTORY_CAP + 5):
+        registry._db.execute(
+            "INSERT INTO search_history (query, last_run, hits) VALUES (?, ?, 1)",
+            (f"запрос {i}", f"2026-08-31T00:{i // 60:02d}:{i % 60:02d}+00:00"),
+        )
+    registry._db.commit()
+    registry.record_search("самый свежий", 1)
+    history = registry.list_searches()
+    assert len(history) == HISTORY_CAP
+    assert history[0].query == "самый свежий"
+    assert "запрос 0" not in {r.query for r in history}, "вытесняется самое старое"
+
+
+def test_an_empty_query_is_not_remembered(registry):
+    registry.record_search("   ", 0)
+    assert registry.list_searches() == []

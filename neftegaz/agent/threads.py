@@ -39,10 +39,15 @@ from pathlib import Path
 from neftegaz.config import settings
 
 __all__ = [
+    "HISTORY_CAP",
+    "MIN_QUERY_CHARS",
+    "SearchRecord",
     "ThreadInfo",
     "ThreadRegistry",
     "TITLE_CAP",
+    "TurnHit",
     "default_title",
+    "fts_query",
     "get_registry",
     "registry_unavailable_reason",
     "reset_registry",
@@ -51,6 +56,14 @@ __all__ = [
 # Заголовок по умолчанию — первый вопрос, обрезанный до этой длины. Число
 # видно здесь, а не растворено в вызове: в списке нитей оно задаёт ширину.
 TITLE_CAP = 60
+
+# ★МИНИМАЛЬНАЯ ДЛИНА ЗАПРОСА, и она названа вслух в интерфейсе. Триграммный
+# токенизатор режет текст на тройки символов, поэтому запрос короче трёх букв
+# сопоставлять не с чем: он не «ничего не нашёл», он в принципе не может искать.
+MIN_QUERY_CHARS = 3
+
+# Потолок истории поиска. Вытеснение по времени последнего исполнения.
+HISTORY_CAP = 200
 
 
 def _now() -> str:
@@ -74,6 +87,69 @@ def default_title(question: str) -> str:
     if space >= TITLE_CAP // 2:
         cut = cut[:space]
     return cut.rstrip(" ,.;:—-") + "…"
+
+
+def _stem(word: str) -> str:
+    """Срезать окончание, чтобы словоформа нашла словоформу.
+
+    ★ЗАЧЕМ ЭТО ВООБЩЕ НУЖНО, ЕСЛИ ТОКЕНИЗАТОР УЖЕ ТРИГРАММНЫЙ. Триграммы дают
+    поиск по ПОДСТРОКЕ, и этого достаточно, чтобы «добыч» нашло «добычи», — но
+    недостаточно для того, чего требует приёмка: «добыча» подстрокой в «добычи»
+    не входит, и запрос целым словом не находит ничего. Замер 31.08 на живой
+    FTS5: «добыча» → 0 совпадений, «сокращение» → 0, «прогнозы» → 0.
+
+    Морфологии в FTS5 нет и не появится, полноценный стеммер — отдельная
+    зависимость ради одного поля. Срезка хвоста — грубая замена, и цена у неё
+    честная: запрос становится короче, а значит шире, и ложных срабатываний
+    больше. Замер той же меры: шесть словоформ из шести нашли свои пары, четыре
+    посторонних слова не нашли ничего.
+
+    Длины хвоста выбраны по длине слова: русское окончание — одна-три буквы, и
+    срезать три буквы у короткого слова значило бы искать по огрызку.
+    """
+    n = len(word)
+    if n >= 8:
+        return word[:-3]
+    if n >= 6:
+        return word[:-2]
+    if n >= 4:
+        return word[:-1]
+    return word
+
+
+def fts_query(text: str) -> str:
+    """Запрос пользователя → выражение FTS5. Пустая строка, если искать нечего.
+
+    Каждое слово идёт отдельной фразой в кавычках: так знаки препинания и
+    операторы FTS5 (``NOT``, ``*``, скобки) не толкуются как синтаксис. Слова
+    соединяются неявным И — «прогноз добычи» обязано найти ход, где есть оба.
+    """
+    words = [w for w in re.findall(r"\w+", text.lower()) if len(w) >= MIN_QUERY_CHARS]
+    if not words:
+        return ""
+    # Двойная кавычка внутри фразы FTS5 экранируется удвоением.
+    return " ".join('"{}"'.format(_stem(w).replace('"', '""')) for w in words)
+
+
+@dataclass(frozen=True)
+class TurnHit:
+    """Один найденный ход — с разговором, из которого он взят."""
+
+    thread_id: str
+    thread_title: str
+    ordinal: int
+    asked_at: str
+    question: str
+    answer: str
+
+
+@dataclass(frozen=True)
+class SearchRecord:
+    """Строка истории поиска."""
+
+    query: str
+    last_run: str
+    hits: int
 
 
 @dataclass(frozen=True)
@@ -111,6 +187,42 @@ CREATE TABLE IF NOT EXISTS turns (
 
 CREATE INDEX IF NOT EXISTS turns_by_thread ON turns (thread_id, ordinal);
 CREATE INDEX IF NOT EXISTS threads_by_updated ON threads (updated_at DESC);
+
+-- ★ТОКЕНИЗАТОР trigram, А НЕ unicode61. Штатный токенизатор режет текст на
+-- слова и сопоставляет их целиком, а русской морфологии в FTS5 нет: запрос
+-- «добыча» не нашёл бы «добычи». Триграммы ищут подстроку и от морфологии не
+-- зависят. Цена названа и уплачена сознательно: индекс больше, а короткие
+-- запросы дают ложные срабатывания — отсюда MIN_QUERY_CHARS.
+--
+-- content='turns' — индекс без второй копии текста: строки берутся из самой
+-- таблицы ходов. Синхронизацию держат триггеры ниже.
+CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
+    question,
+    answer,
+    content='turns',
+    content_rowid='turn_id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS turns_fts_insert AFTER INSERT ON turns BEGIN
+    INSERT INTO turns_fts (rowid, question, answer)
+    VALUES (new.turn_id, new.question, new.answer);
+END;
+
+-- Удаление хода обязано убирать его и из индекса, иначе удалённый разговор
+-- продолжал бы находиться поиском — то есть «удалено» значило бы «скрыто».
+CREATE TRIGGER IF NOT EXISTS turns_fts_delete AFTER DELETE ON turns BEGIN
+    INSERT INTO turns_fts (turns_fts, rowid, question, answer)
+    VALUES ('delete', old.turn_id, old.question, old.answer);
+END;
+
+CREATE TABLE IF NOT EXISTS search_history (
+    query    TEXT PRIMARY KEY,
+    last_run TEXT NOT NULL,
+    hits     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS history_by_time ON search_history (last_run DESC);
 """
 
 
@@ -135,6 +247,29 @@ class ThreadRegistry:
         self._lock = threading.Lock()
         with self._lock:
             self._db.executescript(_SCHEMA)
+            self._db.commit()
+            self._resync_fts()
+
+    def _resync_fts(self) -> None:
+        """Пересобрать поисковый индекс, если он разошёлся с таблицей ходов.
+
+        Нужно в двух случаях: ходы записаны раньше, чем появился индекс (то
+        есть при обновлении уже работающей установки), и порча содержимого.
+        ★Проверка — СЧЁТЧИК, а не доверие триггерам: разошедшийся индекс не
+        падает, он молча ничего не находит, и это неотличимо от «в разговорах
+        такого нет».
+
+        ⚠СЧИТАЕТСЯ ТЕНЕВАЯ ``turns_fts_docsize``, А НЕ ``turns_fts``. У таблицы
+        с ``content='turns'`` запрос ``count(*) FROM turns_fts`` идёт в саму
+        таблицу ходов, а не в индекс, и потому ВСЕГДА с ней согласен: замер
+        31.08 — после полного опустошения индекса он по-прежнему отвечал «2»,
+        тогда как ``docsize`` честно показал «0». Проверка, читающая
+        проверяемое через тот же путь, проверкой не является.
+        """
+        turns = self._db.execute("SELECT count(*) FROM turns").fetchone()[0]
+        indexed = self._db.execute("SELECT count(*) FROM turns_fts_docsize").fetchone()[0]
+        if turns != indexed:
+            self._db.execute("INSERT INTO turns_fts (turns_fts) VALUES ('rebuild')")
             self._db.commit()
 
     def close(self) -> None:
@@ -258,6 +393,92 @@ class ThreadRegistry:
                     self._db.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
             self._db.commit()
         return removed
+
+
+    # ── сквозной поиск по разговорам ───────────────────────────────────────
+
+    def search_turns(self, query: str, limit: int = 50) -> list[TurnHit]:
+        """Найти ходы во ВСЕХ разговорах.
+
+        Ищем по разговорам, а не по отчётам, и выдачи не смешиваем: у них
+        разный провенанс и разная цена ошибки. Промах поиска по разговорам
+        стои́т лишнего клика, промах по отчётам — неверного числа в ответе.
+        """
+        expression = fts_query(query)
+        if not expression:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT t.thread_id, t.ordinal, t.asked_at, t.question, t.answer, "
+                "       COALESCE(th.title, t.thread_id) AS title "
+                "FROM turns_fts f "
+                "JOIN turns t ON t.turn_id = f.rowid "
+                "LEFT JOIN threads th ON th.thread_id = t.thread_id "
+                "WHERE turns_fts MATCH ? "
+                "ORDER BY rank, t.asked_at DESC LIMIT ?",
+                (expression, limit),
+            ).fetchall()
+        return [
+            TurnHit(
+                thread_id=r["thread_id"],
+                thread_title=r["title"],
+                ordinal=r["ordinal"],
+                asked_at=r["asked_at"],
+                question=r["question"],
+                answer=r["answer"],
+            )
+            for r in rows
+        ]
+
+    # ── история поиска ─────────────────────────────────────────────────────
+
+    def record_search(self, query: str, hits: int) -> None:
+        """Запомнить запрос. Повтор ПОДНИМАЕТ строку, а не плодит новую."""
+        clean = re.sub(r"\s+", " ", query).strip()
+        if not clean:
+            return
+        stamp = _now()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO search_history (query, last_run, hits) VALUES (?, ?, ?) "
+                "ON CONFLICT(query) DO UPDATE SET last_run = excluded.last_run, "
+                "hits = excluded.hits",
+                (clean, stamp, hits),
+            )
+            # Вытеснение по времени: сверх потолка уходит самое старое.
+            self._db.execute(
+                "DELETE FROM search_history WHERE query NOT IN ("
+                "SELECT query FROM search_history ORDER BY last_run DESC LIMIT ?)",
+                (HISTORY_CAP,),
+            )
+            self._db.commit()
+
+    def list_searches(self) -> list[SearchRecord]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT query, last_run, hits FROM search_history ORDER BY last_run DESC"
+            ).fetchall()
+        return [
+            SearchRecord(query=r["query"], last_run=r["last_run"], hits=r["hits"]) for r in rows
+        ]
+
+    def forget_search(self, query: str) -> bool:
+        """Убрать один запрос из истории.
+
+        ★Строка УХОДИТ ИЗ БАЗЫ, а не помечается скрытой. Это история человека,
+        и «удалено» обязано значить удалено, иначе мы храним то, что нас
+        попросили не хранить.
+        """
+        with self._lock:
+            cur = self._db.execute("DELETE FROM search_history WHERE query = ?", (query,))
+            self._db.commit()
+            return cur.rowcount > 0
+
+    def clear_searches(self) -> int:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM search_history")
+            self._db.commit()
+            return cur.rowcount
 
 
 _REGISTRY: ThreadRegistry | None = None

@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from neftegaz.agent.graph import answer_question, new_thread_id  # noqa: E402
 from neftegaz.agent.threads import (  # noqa: E402
+    MIN_QUERY_CHARS,
+    fts_query,
     get_registry,
     registry_unavailable_reason,
 )
@@ -333,6 +335,99 @@ def panel_conversation() -> None:
             st.warning("Название не может быть пустым.")
 
 
+def run_search(query: str) -> None:
+    """Выполнить поиск и запомнить запрос вместе с числом найденного."""
+    registry = get_registry()
+    hits = registry.search_turns(query)
+    registry.record_search(query, len(hits))
+    st.session_state.search_hits = hits
+    st.session_state.search_last = query
+
+
+def panel_search() -> None:
+    """Сквозной поиск по разговорам и история запросов."""
+    st.markdown("### 🔎 Поиск по разговорам")
+
+    reason = registry_unavailable_reason()
+    if reason:
+        st.info(reason)
+        return
+
+    registry = get_registry()
+    st.caption(
+        "Ищем по вопросам и ответам ВСЕХ разговоров — не по отчётам: у них разный "
+        f"провенанс и разная цена ошибки. Запрос — от {MIN_QUERY_CHARS} букв; поиск "
+        "подстрочный, поэтому находит и другую словоформу."
+    )
+
+    with st.form("search_form"):
+        query = st.text_input(
+            "Запрос",
+            key="search_field",
+            label_visibility="collapsed",
+            placeholder="слово или несколько",
+        )
+        go = st.form_submit_button("Искать", use_container_width=True)
+    if go:
+        if fts_query(query):
+            run_search(query)
+            st.rerun()
+        else:
+            # ★Не «ничего не найдено»: короткий запрос не искался вовсе, и
+            # выдать пустоту значило бы соврать про содержимое разговоров.
+            st.warning(
+                f"Слишком короткий запрос: нужно хотя бы {MIN_QUERY_CHARS} буквы подряд. "
+                "Поиск идёт по тройкам символов, и сопоставлять меньшее не с чем."
+            )
+
+    last = st.session_state.get("search_last", "")
+    hits = st.session_state.get("search_hits", [])
+    if last:
+        st.markdown(f"**Найдено: {len(hits)}** по запросу «{last}»")
+        for hit in hits:
+            with st.container(border=True):
+                st.caption(
+                    f"{hit.thread_title} · ход {hit.ordinal} · "
+                    f"{hit.asked_at[:16].replace('T', ' ')}"
+                )
+                st.markdown(f"**{hit.question}**")
+                st.markdown(hit.answer)
+                if st.button(
+                    "Перейти в разговор",
+                    key=f"search_go_{hit.thread_id}_{hit.ordinal}",
+                    use_container_width=True,
+                ):
+                    open_thread(hit.thread_id)
+                    st.rerun()
+
+    history = registry.list_searches()
+    if not history:
+        return
+
+    st.markdown("---")
+    head, clear = st.columns([3, 2], gap="small")
+    head.markdown("**История поиска**")
+    if clear.button("Очистить всё", key="history_clear", use_container_width=True):
+        registry.clear_searches()
+        st.rerun()
+
+    for record in history:
+        again, drop = st.columns([5, 1], gap="small")
+        if again.button(
+            record.query,
+            key=f"history_run_{record.query}",
+            use_container_width=True,
+            help=f"найдено {record.hits}, последний раз {record.last_run[:16].replace('T', ' ')}",
+        ):
+            run_search(record.query)
+            st.rerun()
+        if drop.button("🗑", key=f"history_del_{record.query}", help="Забыть запрос"):
+            # Удаление настоящее: строка уходит из базы, а не помечается
+            # скрытой. Это история человека, и «удалено» значит удалено.
+            registry.forget_search(record.query)
+            st.rerun()
+
+
 def panel_corpus() -> None:
     """Корпус отчётов: какие файлы лежат в основе ответов."""
     st.markdown("### 📄 Корпус отчётов")
@@ -390,7 +485,8 @@ def panel_forecast() -> None:
 PANELS: dict[str, tuple[str, str, object]] = {
     "info": ("ℹ️", "Конфигурация", panel_info),
     "sources": ("📚", "Источники ответа", panel_sources),
-    "conversation": ("💬", "Разговор", panel_conversation),
+    "conversation": ("💬", "Разговоры", panel_conversation),
+    "search": ("🔎", "Поиск по разговорам", panel_search),
     "corpus": ("📄", "Корпус отчётов", panel_corpus),
     "forecast": ("📈", "Расчётный модуль", panel_forecast),
 }
