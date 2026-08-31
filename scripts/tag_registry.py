@@ -148,7 +148,7 @@ def parse(text: str) -> list[Record]:
                 records.append(Record(number, title, "\n".join(cur), start))
             number, title, start, cur = m.group(1), m.group(2), i, []
         elif number:
-            if line.startswith("## ") or line.startswith("# "):
+            if line.startswith(("## ", "# ")):
                 records.append(Record(number, title, "\n".join(cur), start))
                 number = ""
                 cur = []
