@@ -517,7 +517,7 @@ def panel_settings() -> None:
     # текст вопроса пользователя. Строка «веб-поиск включён» без имени адресата
     # выглядит как честная опись и ею не является.
     backend, backend_why = checked_backend()
-    web_backend = f"веб-поиск: {backend}" if backend else "веб-поиск: настройка неверна"
+    web_backend = f"{backend} (через ddgs)" if backend else "адресат не определён"
     web_state = "включено" if backend else f"выключено — {backend_why[:80]}"
     st.markdown(
         f"| куда | зачем | когда | состояние |\n|---|---|---|---|\n"
