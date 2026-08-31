@@ -98,6 +98,41 @@ def test_a_citation_to_a_page_outside_the_corpus_is_caught(tmp_path):
     assert totals["missing"] == 1
 
 
+def test_a_number_on_neither_of_two_adjacent_pages_is_caught(tmp_path):
+    """★Обратная сторона склейки смежных ссылок: она не имеет права ничего прощать.
+
+    Числа перед парой ссылок сверяются с ОБЪЕДИНЕНИЕМ их страниц — значит
+    появляется соблазн: чем больше ссылок подряд, тем шире стог сена. Число, не
+    стоящее ни на одной из названных страниц, обязано ловиться по-прежнему,
+    иначе перечисление источников стало бы способом уйти от проверки.
+    """
+    answer = write_answer(
+        tmp_path,
+        "Добыча и потребление составили 13.28 и 14.99 соответственно "
+        "[Отчёт EIA STEO, июль 2026, с. 35], [Отчёт EIA STEO, июль 2026, с. 36].",
+    )
+    code, totals = check_citations.run([answer], PAGES)
+    assert code == 1
+    assert totals["missing"] == 1  # 13.28 нашлось, 14.99 нет ни там, ни там
+
+
+def test_a_report_and_a_web_source_side_by_side_are_not_merged(tmp_path):
+    """Разнородные ссылки подряд не склеиваются — иначе веб стал бы отмазкой.
+
+    Если бы «[Отчёт …], [Источник …]» считались одной группой, число, которого
+    нет на странице отчёта, списывалось бы на непроверяемый по природе веб, и
+    сверка молчала бы ровно там, где обязана говорить.
+    """
+    answer = write_answer(
+        tmp_path,
+        "Добыча составила 14.99 [Отчёт EIA STEO, июль 2026, с. 35], [Источник: обзор рынка].",
+    )
+    code, totals = check_citations.run([answer], PAGES)
+    assert code == 1
+    assert totals["missing"] == 1
+    assert totals["web"] == 0
+
+
 def test_nothing_to_check_is_not_a_pass(tmp_path):
     """Третье состояние: «проверке не досталось работы» ≠ «проверено и чисто»."""
     answer = write_answer(tmp_path, "Данных по этому вопросу в отчётах нет.")
@@ -137,6 +172,25 @@ def test_a_marked_citation_with_a_true_number_passes(tmp_path):
     code, totals = check_citations.run([answer], PAGES)
     assert code == 0
     assert totals["checked"] == 1
+
+
+def test_two_numbers_before_two_citations_belong_to_both_pages(tmp_path):
+    """★Ложная тревога, поймавшаяся на живом ответе 31.08.2026.
+
+    «Добыча и потребление составили 13.28 и 103.45 соответственно [с. 35],
+    [с. 36]» — оба числа стоят ПЕРЕД первой ссылкой. Разрезав по ней, сверка
+    требовала бы найти оба на странице 35 и объявляла бы второе выдуманным.
+    Различить по тексту, какое число к какой ссылке относится, нельзя в
+    принципе, поэтому числа перед группой сверяются с объединением её страниц.
+    """
+    answer = write_answer(
+        tmp_path,
+        "Добыча и потребление составили 13.28 и 103.45 соответственно "
+        "[Отчёт EIA STEO, июль 2026, с. 35], [Отчёт EIA STEO, июль 2026, с. 36].",
+    )
+    code, totals = check_citations.run([answer], PAGES)
+    assert code == 0
+    assert totals == {"checked": 2, "missing": 0, "unmarked": 0, "web": 0}
 
 
 # ── прогон по настоящим отчётам, когда они есть на машине ──────────────────
