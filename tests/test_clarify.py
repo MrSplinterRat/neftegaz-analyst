@@ -22,15 +22,32 @@ from neftegaz.agent import graph as graph_module
 from neftegaz.agent.graph import _after_route, node_clarify, resolve_pending
 
 CUT_WITHOUT_UNIT = "а если ОПЕК+ сократит добычу"
+# ★Эталон непрочитанного сценария — БЕЗ НАПРАВЛЕНИЯ, а не вилка. Вилка была им
+# до 31.08, а теперь читается обоими концами (Р-061), и проверять переспрос на
+# ней значило бы закреплять поведение, которого больше нет. Механизм переспроса
+# от этого не изменился: изменился список случаев, при которых разбор отказывает.
+NO_DIRECTION = "сценарий: 2 млн барр/сут"
+UNKNOWN_UNIT = "если ОПЕК+ сократит добычу на 2"
 VILKA = "сокращение с 2 до 3 млн барр/сут"
 
 
 # ── когда спрашивать, а когда молчать ──────────────────────────────────────
 
 
-@pytest.mark.parametrize("question", [VILKA, "сценарий: 2 млн барр/сут", CUT_WITHOUT_UNIT])
+@pytest.mark.parametrize("question", [NO_DIRECTION, UNKNOWN_UNIT, CUT_WITHOUT_UNIT])
 def test_unreadable_scenario_goes_to_clarify(question):
     assert _after_route({"route": "forecast", "question": question}) == "clarify"
+
+
+def test_a_range_goes_straight_to_the_forecast():
+    """Вилка больше не повод для переспроса: оба её конца считаются.
+
+    ★Проверка стоит рядом с проверкой переспроса намеренно. Ветка уточнения
+    жива и обязана срабатывать на трёх случаях выше; ошибиться легко в обе
+    стороны, и молчаливое расширение переспроса на понятный вопрос — такая же
+    беда, как его исчезновение.
+    """
+    assert _after_route({"route": "forecast", "question": VILKA}) == "forecast"
 
 
 @pytest.mark.parametrize(
@@ -48,12 +65,16 @@ def test_readable_or_absent_scenario_goes_straight_to_forecast(question):
 
 def test_industry_question_is_never_clarified():
     """Сценарий не влияет на отраслевой вопрос — спрашивать там не о чем."""
-    assert _after_route({"route": "industry", "question": VILKA}) == "retrieve"
+    assert _after_route({"route": "industry", "question": NO_DIRECTION}) == "retrieve"
 
 
 def test_waiver_skips_clarification():
+    # ★Вопрос обязан быть НЕПРОЧИТАННЫМ, иначе проверка проходит всегда: на
+    # понятном вопросе ветка уточнения не срабатывает и без отказа, и тест
+    # остался бы зелёным на сломанном отказе. До 31.08 здесь стояла вилка,
+    # и с её переводом в читаемые она стала бы ровно таким тестом.
     assert (
-        _after_route({"route": "forecast", "question": VILKA, "scenario_waived": True})
+        _after_route({"route": "forecast", "question": NO_DIRECTION, "scenario_waived": True})
         == "forecast"
     )
 
@@ -113,9 +134,9 @@ def test_route_glues_and_sends_to_forecast_without_asking_the_classifier(monkeyp
 
 def test_waiver_returns_the_original_question_as_a_plain_forecast(monkeypatch):
     monkeypatch.setattr(graph_module, "ask", lambda *a, **k: "forecast")
-    out = graph_module.node_route({"question": "без сценария", "pending_question": VILKA})
+    out = graph_module.node_route({"question": "без сценария", "pending_question": NO_DIRECTION})
     assert out["route"] == "forecast"
-    assert out["question"] == VILKA
+    assert out["question"] == NO_DIRECTION
     assert out["scenario_waived"] is True
     assert out["pending_question"] == ""
 
@@ -153,6 +174,6 @@ def test_waived_scenario_is_still_announced_but_differently(monkeypatch):
     monkeypatch.setattr(
         "neftegaz.tools.forecast_tool.run_forecast", lambda **k: _Report(), raising=True
     )
-    state = graph_module.node_forecast({"question": VILKA, "scenario_waived": True})
+    state = graph_module.node_forecast({"question": NO_DIRECTION, "scenario_waived": True})
     assert "по твоей просьбе" in state["forecast_text"]
     assert "не прочитан" not in state["forecast_text"]

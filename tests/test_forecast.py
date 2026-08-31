@@ -852,3 +852,142 @@ def test_the_narrower_band_still_covers_the_facts():
     assert total >= 15, "окон слишком мало, проверка ничего не значит"
     share = inside / total
     assert 0.85 <= share <= 1.0, f"покрытие 95% коридора вышло {share:.0%}"
+
+
+# ── вилка сценария: оба конца доходят до чисел (Р-061) ──────────────────────
+
+
+def _write_prices(series, tmp_path):
+    frame = pd.DataFrame({"date": series.index.strftime("%Y-%m-%d"), "close": series.to_numpy()})
+    path = tmp_path / "prices.csv"
+    frame.to_csv(path, index=False)
+    return str(path)
+
+
+def test_a_range_scenario_yields_two_points_and_a_union_corridor(series, tmp_path):
+    """Вилка даёт ДВЕ точки, и каждая равна прогнозу своего конца поодиночке.
+
+    ★Проверка не повторяет расчёт своей формулой, а сравнивает вилку с двумя
+    ОТДЕЛЬНЫМИ прогонами того же кода. Своя формула ошиблась бы вместе с
+    проверяемым — например, оба раза применив множитель к уже сдвинутой цене.
+    """
+    import neftegaz.tools.forecast_tool as tool
+
+    path = _write_prices(series, tmp_path)
+    near = tool.run_forecast(
+        horizon_days=30, method="ses", supply_change_mb_d=-2.0, prices_csv=path
+    )
+    far = tool.run_forecast(horizon_days=30, method="ses", supply_change_mb_d=-3.0, prices_csv=path)
+    both = tool.run_forecast(
+        horizon_days=30,
+        method="ses",
+        supply_change_mb_d=-2.0,
+        supply_change_high_mb_d=-3.0,
+        prices_csv=path,
+    )
+
+    assert both.point == pytest.approx(near.point)
+    assert both.point_high == pytest.approx(far.point)
+    # ★Дальний конец считается ОТ БАЗЫ, а не от уже сдвинутого прогноза. Сдвиг
+    # от сдвига дал бы произведение множителей — сценарий «сначала на 2, потом
+    # ещё на 3», которого никто не называл.
+    assert both.point_high != pytest.approx(near.point * (far.point / near.point) ** 2)
+    # Коридор накрывает оба конца, а не усредняет их.
+    assert both.lower == pytest.approx(min(near.lower, far.lower))
+    assert both.upper == pytest.approx(max(near.upper, far.upper))
+
+
+def test_a_range_is_printed_as_a_range_and_named_as_one(series, tmp_path):
+    """Диапазон виден в тексте, назван вилкой, и границы идут по возрастанию."""
+    import neftegaz.tools.forecast_tool as tool
+
+    path = _write_prices(series, tmp_path)
+    report = tool.run_forecast(
+        horizon_days=30,
+        method="ses",
+        supply_change_mb_d=-2.0,
+        supply_change_high_mb_d=-3.0,
+        prices_csv=path,
+    )
+    text = report.as_text()
+
+    low, high = sorted((report.point, report.point_high))
+    assert f"{low:.2f} — {high:.2f} долл./барр." in text
+    assert "вилка сценария" in text
+    assert "от 2.00 до 3.00 млн барр./сут" in text
+    assert "множители к цене" in text
+    # Оговорка о двойном умножении остаётся и у вилки — во множественном числе.
+    assert "ещё раз НЕ НУЖНО" in text
+    # ★Середина вилки не объявляется нашей оценкой: усреднить незнание значило
+    # бы выдать его за знание.
+    assert "усредняет" in text
+
+
+def test_an_ordinary_scenario_is_unchanged_by_the_range_machinery(series, tmp_path):
+    """★Отрицательный контроль: без вилки отчёт обязан остаться прежним.
+
+    Без него правка могла бы незаметно перевести ВСЕ сценарные ответы в форму
+    диапазона — и одиночное значение печаталось бы как «97.21 — 97.21».
+    """
+    import neftegaz.tools.forecast_tool as tool
+
+    path = _write_prices(series, tmp_path)
+    report = tool.run_forecast(
+        horizon_days=30, method="ses", supply_change_mb_d=-2.0, prices_csv=path
+    )
+    text = report.as_text()
+
+    assert report.point_high is None
+    assert "вилка сценария" not in text
+    assert " — " not in text.split("Прогноз на конец горизонта:")[1].split("\n")[0]
+    assert "множитель к цене" in text
+    assert "множители к цене" not in text
+
+
+def test_the_range_reaches_the_forecast_node_from_the_question(monkeypatch):
+    """Сквозная проверка: вилка из ВОПРОСА доезжает до вызова расчёта.
+
+    ★Разбор и расчёт по отдельности уже проверены. Здесь проверяется шов между
+    ними — место, где новое поле легче всего потерять, потому что потеря даёт
+    исправный на вид ответ по одному концу.
+    """
+    from neftegaz.agent import graph as graph_module
+
+    seen = {}
+
+    class _Report:
+        def as_text(self):
+            return "Инструмент: Brent"
+
+    def _fake_run_forecast(**kwargs):
+        seen.update(kwargs)
+        return _Report()
+
+    monkeypatch.setattr(
+        "neftegaz.tools.forecast_tool.run_forecast", _fake_run_forecast, raising=True
+    )
+    graph_module.node_forecast({"question": "сокращение добычи с 2 до 3 млн барр./сут"})
+
+    assert seen["supply_change_mb_d"] == pytest.approx(-2.0)
+    assert seen["supply_change_high_mb_d"] == pytest.approx(-3.0)
+
+
+def test_an_ordinary_question_sends_no_second_end(monkeypatch):
+    """Отрицательный контроль к предыдущему: без вилки второй конец пуст."""
+    from neftegaz.agent import graph as graph_module
+
+    seen = {}
+
+    class _Report:
+        def as_text(self):
+            return "Инструмент: Brent"
+
+    monkeypatch.setattr(
+        "neftegaz.tools.forecast_tool.run_forecast",
+        lambda **kwargs: (seen.update(kwargs), _Report())[1],
+        raising=True,
+    )
+    graph_module.node_forecast({"question": "сокращение добычи на 2 млн барр./сут"})
+
+    assert seen["supply_change_mb_d"] == pytest.approx(-2.0)
+    assert seen["supply_change_high_mb_d"] is None

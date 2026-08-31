@@ -768,6 +768,9 @@ def node_forecast(state: AgentState) -> AgentState:
         report = run_forecast(
             horizon_days=horizon,
             supply_change_mb_d=scenario.value_mb_d,
+            # Вилка едет в расчёт вторым концом, а не теряется по дороге:
+            # у обычного сценария это поле пусто, и ветка ведёт себя как прежде.
+            supply_change_high_mb_d=scenario.value_high_mb_d,
         )
         text = report.as_text()
         if scenario.unreadable:

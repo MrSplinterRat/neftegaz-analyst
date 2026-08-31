@@ -76,16 +76,73 @@ def test_no_scenario_stays_no_scenario():
         assert not scenario.unreadable
 
 
-def test_range_is_refused_rather_than_guessed():
-    """Вилка «с 2 до 3» — не повод выбрать один конец за человека.
+@pytest.mark.parametrize(
+    ("question", "near", "far"),
+    [
+        ("сокращение с 2 до 3 млн барр/сут", -2.0, -3.0),
+        ("прогноз при сокращении добычи от 2 до 3 млн барр./сут", -2.0, -3.0),
+        ("сценарий: сокращение предложения на 2–3 млн барр./сут", -2.0, -3.0),
+        ("что с ценой при сокращении на 1.5-2 млн барр/сут", -1.5, -2.0),
+        ("если добыча вырастет с 500 до 800 тыс. барр./сут", 0.5, 0.8),
+        # Вилка, записанная задом наперёд, остаётся вилкой: концы упорядочивает
+        # разбор, а не человек.
+        ("сокращение с 3 до 2 млн барр/сут", -2.0, -3.0),
+    ],
+)
+def test_range_is_read_as_both_ends(question, near, far):
+    """Вилка «с 2 до 3» читается диапазоном, и оба конца попадают в расчёт.
 
-    Прежний разбор возвращал −3.0, то есть отвечал на вопрос, которого никто
-    не задавал.
+    Прежний разбор либо переспрашивал, либо — на формах через тире и «от … до»
+    — молча брал ОДИН конец: замер до правки дал −3.00 на «2–3 млн барр./сут»
+    и −2.00 на «1.5-2 млн барр/сут», без единого слова об этом.
     """
-    scenario = read_supply_scenario("сокращение с 2 до 3 млн барр/сут")
-    assert scenario.unreadable
-    assert scenario.value_mb_d == 0.0
-    assert "вилка" in scenario.note
+    scenario = read_supply_scenario(question)
+    assert not scenario.unreadable
+    assert scenario.is_range
+    assert scenario.value_mb_d == pytest.approx(near)
+    assert scenario.value_high_mb_d == pytest.approx(far)
+    # Знак у концов один: вилка задаёт силу изменения, а не его сторону.
+    assert scenario.value_mb_d * scenario.value_high_mb_d > 0
+    # Ближний к нулю конец лежит в СТАРОМ поле — потребитель, не знающий про
+    # вилку, получает осторожную оценку эффекта, а не преувеличенную.
+    assert abs(scenario.value_mb_d) < abs(scenario.value_high_mb_d)
+
+
+def test_range_of_percent_is_read_too():
+    """Проценты — такая же единица, и вилка процентов считается так же."""
+    scenario = read_supply_scenario("если предложение упадёт с 2 до 3 процентов")
+    assert scenario.is_range
+    step = settings.global_supply_mb_d / 100.0
+    assert scenario.value_mb_d == pytest.approx(-2.0 * step)
+    assert scenario.value_high_mb_d == pytest.approx(-3.0 * step)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # ★Предельный случай, ради которого вилка и привязана к позиции единицы.
+        # Прежнее правило искало «с N до M» по всему вопросу и объявляло вилкой
+        # ВЕЛИЧИНЫ пару ГОДОВ — переспрашивало о том, что названо однозначно.
+        "что с ценой с 2024 до 2026 года при сокращении на 1,5 млн барр./сут",
+        "прогноз на 2024-2025 годы при сокращении добычи на 2 млн барр./сут",
+        # Две цифры рядом — горизонт и величина: тоже не вилка.
+        "прогноз Brent на 2 года при сокращении добычи на 1,5 млн барр./сут",
+        "сокращение добычи на 500 тыс. барр./сут с 1 января",
+        # Одиночное значение обязано остаться одиночным.
+        "если ОПЕК+ сократит добычу на 2 млн барр./сут",
+        "что с ценой при сокращении на 5%",
+    ],
+)
+def test_a_single_value_is_not_read_as_a_range(question):
+    """Отрицательный контроль: числа в другом месте фразы вилкой не становятся.
+
+    Половина набора — не «одно число», а именно ловушки: две цифры рядом,
+    из которых вторая относится к сроку, а не к добыче.
+    """
+    scenario = read_supply_scenario(question)
+    assert not scenario.is_range
+    assert scenario.value_high_mb_d is None
+    assert not scenario.unreadable
 
 
 def test_direction_absent_is_refused():
@@ -137,7 +194,11 @@ def test_unreadable_scenario_is_announced_in_the_forecast(monkeypatch):
     monkeypatch.setattr(
         "neftegaz.tools.forecast_tool.run_forecast", _fake_run_forecast, raising=True
     )
-    state = graph_module.node_forecast({"question": "сокращение с 2 до 3 млн барр/сут"})
+    # ★Пример непрочитанного сценария взят НЕ вилкой: вилка с 31.08 читается
+    # обоими концами (см. `test_range_is_read_as_both_ends`). Проверяемый здесь
+    # механизм — «отказ разбора доходит до текста ответа» — от этого не
+    # изменился, изменился лишь список случаев, при которых разбор отказывает.
+    state = graph_module.node_forecast({"question": "а если ОПЕК+ сократит добычу?"})
     text = state["forecast_text"]
     assert "не прочитан" in text
     assert "БАЗОВЫЙ" in text

@@ -134,6 +134,24 @@ def price_multiplier(share: float, elasticity: float) -> float:
     return (1.0 + share) ** (1.0 / elasticity)
 
 
+def _point_line(point: float, point_high: float | None, mark: str) -> str:
+    """Строка прогноза: одно число, а у вилки сценария — диапазон.
+
+    ★Концы печатаются от меньшего к большему, а не в порядке «ближний конец
+    вилки, дальний конец вилки». Порядок вилки — про величину ДОПУЩЕНИЯ, порядок
+    цены — про саму цену, и при сокращении они противоположны: более глубокое
+    сокращение даёт БОЛЬШУЮ цену. Печатать «от 104.10 до 101.30» значит заставить
+    читателя проверять, не перепутаны ли границы.
+    """
+    if point_high is None:
+        return f"Прогноз на конец горизонта: {point:.2f} долл./барр.{mark}"
+    low, high = sorted((point, point_high))
+    return (
+        f"Прогноз на конец горизонта: {low:.2f} — {high:.2f} долл./барр.{mark} "
+        f"— вилка сценария, по одному числу на каждый её конец"
+    )
+
+
 @dataclass(frozen=True)
 class ForecastReport:
     """Everything the agent needs to answer a forecast question."""
@@ -160,6 +178,14 @@ class ForecastReport:
     # доказывает; расхождение с ним столь же информативно и должно быть видно.
     second_opinion: str | None
     frame: pd.DataFrame
+    # Вторая точка прогноза — только у вилки сценария («сокращение с 2 до 3 млн
+    # барр./сут»). Тогда одной центральной линии не существует: концов у
+    # допущения два, и каждый даёт свою.
+    #
+    # ★Поле отдельное, а не замена `point` парой, потому что вилка — редкий
+    # случай, а `point` читают все. Пустое поле значит «вилки не было», и
+    # обычный прогноз остаётся ровно таким, каким был.
+    point_high: float | None = None
 
     def staleness_note(self, today: date | None = None) -> str:
         """Оговорка о том, что ряд цен устарел, или пустая строка.
@@ -203,7 +229,7 @@ class ForecastReport:
             f"{self.staleness_note()}",
             f"Горизонт: {self.horizon_days} дн.",
             f"Метод: {self.method}",
-            f"Прогноз на конец горизонта: {self.point:.2f} долл./барр.{mark}",
+            _point_line(self.point, self.point_high, mark),
             f"95% доверительный интервал: {self.lower:.2f} — {self.upper:.2f} долл./барр.{mark}",
         ]
         if self.scenario:
@@ -329,8 +355,18 @@ def run_forecast(
     supply_change_mb_d: float = 0.0,
     instrument: str = "Brent",
     prices_csv: str | None = None,
+    supply_change_high_mb_d: float | None = None,
 ) -> ForecastReport:
     """Load history, forecast, optionally apply a supply scenario.
+
+    ``supply_change_high_mb_d`` задаёт ДАЛЬНИЙ от нуля конец вилки («сокращение
+    с 2 до 3 млн барр./сут»); ближний лежит в ``supply_change_mb_d``. Тогда
+    сценарий считается ДВАЖДЫ, от одного и того же базового прогноза, и отчёт
+    несёт диапазон точки и объединённый коридор.
+
+    ★Почему объединённый, а не средний. Вилка — это незнание величины допущения,
+    и усреднять его значило бы объявить, что мы знаем середину. Коридор обязан
+    накрывать оба конца: граница берётся крайняя из двух, а не полусумма.
 
     Raises FileNotFoundError with an actionable message when the price file is
     absent — that is a setup problem, and silently returning a made-up series
@@ -348,8 +384,19 @@ def run_forecast(
     result = forecast(series, horizon_days, method=method)
 
     scenario_text = None
+    far_result = None
     if supply_change_mb_d:
-        result = apply_supply_scenario(result, supply_change_mb_d, horizon_days=horizon_days)
+        base = result
+        result = apply_supply_scenario(base, supply_change_mb_d, horizon_days=horizon_days)
+        # ★Дальний конец считается ОТ ТОГО ЖЕ базового прогноза, а не от уже
+        # сдвинутого. Сдвиг от сдвига дал бы произведение множителей, то есть
+        # сценарий «сокращение на 2, а потом ещё на 3», которого никто не
+        # называл, — та же ошибка двойного умножения, что однажды уже стоила
+        # 101.98 вместо 97.21, только совершённая кодом, а не читателем.
+        if supply_change_high_mb_d is not None:
+            far_result = apply_supply_scenario(
+                base, supply_change_high_mb_d, horizon_days=horizon_days
+            )
         direction = "сокращение" if supply_change_mb_d < 0 else "увеличение"
         elasticity = result.params["elasticity"]
         multiplier = result.params["price_multiplier"]
@@ -374,15 +421,48 @@ def run_forecast(
         # модель — умножил прогноз на множитель ВТОРОЙ раз и выдал 101.98 вместо
         # 97.21. Ошибка не в расчёте, а в подаче: величина и результат её
         # применения стояли рядом без указания порядка.
+        # Величина и множитель печатаются либо одним числом, либо парой — но
+        # ОДНИМ И ТЕМ ЖЕ текстом вокруг: у вилки и у одиночного значения все
+        # оговорки (об эластичности, о буфере запасов, о расширении коридора)
+        # совпадают дословно, и две копии абзаца разошлись бы при первой же
+        # правке одной из них.
+        if far_result is None:
+            amount = f"на {abs(supply_change_mb_d):.2f} млн барр./сут"
+            share_text = f"{abs(share_pct):.1f}%"
+            multiplier_text = f"⇒ множитель к цене ×{multiplier:.3f}"
+            applied = (
+                f"★Множитель УЖЕ ПРИМЕНЁН к прогнозу и границам, напечатанным выше: "
+                f"без сценария прогноз на конец горизонта составил бы "
+                f"{baseline:.2f} долл./барр. Умножать напечатанные числа на множитель "
+                f"ещё раз НЕ НУЖНО. "
+            )
+        else:
+            far_share_pct = 100.0 * supply_change_high_mb_d / settings.global_supply_mb_d
+            far_multiplier = far_result.params["price_multiplier"]
+            amount = (
+                f"от {abs(supply_change_mb_d):.2f} до "
+                f"{abs(supply_change_high_mb_d):.2f} млн барр./сут"
+            )
+            share_text = f"{abs(share_pct):.1f}…{abs(far_share_pct):.1f}%"
+            multiplier_text = (
+                f"⇒ множители к цене ×{multiplier:.3f} (ближний конец) и "
+                f"×{far_multiplier:.3f} (дальний)"
+            )
+            applied = (
+                f"★Названа ВИЛКА, поэтому прогноз выше напечатан диапазоном: по одному "
+                f"числу на каждый её конец, множители к ним УЖЕ ПРИМЕНЕНЫ. Коридор "
+                f"объединён — он накрывает оба конца, а не усредняет их: середину вилки "
+                f"человек не называл, и объявлять её нашей оценкой было бы подлогом. "
+                f"Без сценария прогноз на конец горизонта составил бы "
+                f"{baseline:.2f} долл./барр. Умножать напечатанные числа на множители "
+                f"ещё раз НЕ НУЖНО. "
+            )
         scenario_text = (
-            f"{direction} предложения на {abs(supply_change_mb_d):.2f} млн барр./сут "
-            f"({abs(share_pct):.1f}% мирового предложения, принятого равным "
+            f"{direction} предложения {amount} "
+            f"({share_text} мирового предложения, принятого равным "
             f"{settings.global_supply_mb_d:.0f} млн барр./сут) "
-            f"⇒ множитель к цене ×{multiplier:.3f}. "
-            f"★Множитель УЖЕ ПРИМЕНЁН к прогнозу и границам, напечатанным выше: "
-            f"без сценария прогноз на конец горизонта составил бы "
-            f"{baseline:.2f} долл./барр. Умножать напечатанные числа на множитель "
-            f"ещё раз НЕ НУЖНО. "
+            f"{multiplier_text}. "
+            f"{applied}"
             f"Допущение: эластичность рыночного клиринга {elasticity:.2f} на горизонте "
             f"{horizon_days} дн. — на сколько процентов должна сдвинуться цена, чтобы "
             f"рынок поглотил сдвиг предложения на процент. Она {origin}. "
@@ -396,6 +476,16 @@ def run_forecast(
     second_opinion = _second_opinion(series, horizon_days, result)
 
     last_row = result.frame.iloc[-1]
+    point = float(last_row["forecast"])
+    lower = float(last_row["lower"])
+    upper = float(last_row["upper"])
+    point_high = None
+    if far_result is not None:
+        far_row = far_result.frame.iloc[-1]
+        point_high = float(far_row["forecast"])
+        # Коридор накрывает оба конца вилки: крайняя граница из двух, не средняя.
+        lower = min(lower, float(far_row["lower"]))
+        upper = max(upper, float(far_row["upper"]))
     return ForecastReport(
         instrument=instrument,
         horizon_days=horizon_days,
@@ -404,11 +494,12 @@ def run_forecast(
         # load_prices гарантирует DatetimeIndex, поэтому последняя метка —
         # это дата последней строки файла, а не заполненный выходной.
         last_date=series.index[-1].date().isoformat(),
-        point=float(last_row["forecast"]),
-        lower=float(last_row["lower"]),
-        upper=float(last_row["upper"]),
+        point=point,
+        lower=lower,
+        upper=upper,
         interpretation=result.interpretation(instrument),
         scenario=scenario_text,
         second_opinion=second_opinion,
         frame=result.frame,
+        point_high=point_high,
     )
