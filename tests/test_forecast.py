@@ -674,3 +674,96 @@ def test_the_convergence_flag_survives_the_supply_scenario():
 
     assert shifted.params["converged"] is False
     assert "НЕ СОШЛАСЬ" in shifted.interpretation()
+
+
+# ── устаревший ряд цен называется вслух (Р-074) ────────────────────────────
+
+
+def _report(last_date: str):
+    import pandas as pd
+
+    from neftegaz.tools.forecast_tool import ForecastReport
+
+    return ForecastReport(
+        instrument="Brent",
+        horizon_days=30,
+        method="ARIMA(1, 1, 1)",
+        last_price=92.70,
+        last_date=last_date,
+        point=93.0,
+        lower=80.0,
+        upper=105.0,
+        interpretation="—",
+        scenario=None,
+        second_opinion=None,
+        frame=pd.DataFrame(),
+    )
+
+
+def test_a_fresh_series_says_nothing_about_staleness():
+    """★Отрицательный контроль. Биржа не торгует в выходные, поэтому разрыв в
+    два-четыре дня — нормальное состояние свежего ряда. Предупреждение на нём
+    звучало бы почти всегда и перестало бы значить что-либо."""
+    from datetime import date
+
+    assert _report("2026-08-28").staleness_note(today=date(2026, 8, 31)) == ""
+
+
+def test_exactly_at_the_threshold_is_still_silent():
+    """Граница включительно: «отстаёт на столько, сколько разрешено» — не повод."""
+    from datetime import date
+
+    assert _report("2026-08-24").staleness_note(today=date(2026, 8, 31)) == ""
+
+
+def test_a_stale_series_is_named_with_the_number_of_days():
+    """Дата печаталась и раньше, но НЕ ОЦЕНИВАЛАСЬ: заметить, что наблюдение
+    месячной давности, должен был сам читатель."""
+    from datetime import date
+
+    note = _report("2026-07-22").staleness_note(today=date(2026, 8, 31))
+    assert "40 дн." in note
+    assert "2026-07-22" in note
+    assert "fetch_prices" in note, "сказано «плохо», но не сказано, что делать"
+
+
+def test_an_unreadable_date_is_not_silently_treated_as_fresh():
+    """★Непонятная дата хуже старой: о ней нельзя даже сказать, насколько она стара.
+
+    Тихо счесть её свежей значило бы превратить сбой разбора в молчаливое
+    подтверждение — худший из возможных исходов.
+    """
+    from datetime import date
+
+    note = _report("вчера").staleness_note(today=date(2026, 8, 31))
+    assert "не удалось прочитать" in note
+
+
+def test_the_threshold_can_be_switched_off():
+    """0 выключает проверку — для развёртываний, где ряд заведомо исторический."""
+    from datetime import date
+
+    from neftegaz import config
+
+    saved = config.settings.prices_stale_days
+    object.__setattr__(config.settings, "prices_stale_days", 0)
+    try:
+        assert _report("2020-01-01").staleness_note(today=date(2026, 8, 31)) == ""
+    finally:
+        object.__setattr__(config.settings, "prices_stale_days", saved)
+
+
+def test_the_warning_reaches_the_text_of_the_report():
+    """Проверяется ТЕКСТ отчёта, а не только метод: строка обязана доехать до
+    читателя, а не остаться доступной коду."""
+    from datetime import date
+
+    from neftegaz import config
+
+    saved = config.settings.prices_stale_days
+    object.__setattr__(config.settings, "prices_stale_days", 1)
+    try:
+        text = _report(str(date.today().replace(year=date.today().year - 1))).as_text()
+    finally:
+        object.__setattr__(config.settings, "prices_stale_days", saved)
+    assert "ряд цен отстаёт" in text

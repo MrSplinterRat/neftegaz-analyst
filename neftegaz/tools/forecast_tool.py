@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date
 from functools import lru_cache
 
 import pandas as pd
@@ -160,6 +161,36 @@ class ForecastReport:
     second_opinion: str | None
     frame: pd.DataFrame
 
+    def staleness_note(self, today: date | None = None) -> str:
+        """Оговорка о том, что ряд цен устарел, или пустая строка.
+
+        ★Дата печаталась и раньше, но НЕ ОЦЕНИВАЛАСЬ: заметить, что наблюдение
+        месячной давности, должен был сам читатель. Сравнение с порогом — ровно
+        та работа, которую человек делать не обязан, а машина делает даром.
+
+        ``today`` передаётся ради проверяемости: тест, зависящий от системных
+        часов, завтра начинает проверять другое.
+        """
+        limit = settings.prices_stale_days
+        if limit <= 0:
+            return ""
+        try:
+            observed = date.fromisoformat(self.last_date)
+        except ValueError:
+            # Дата не разобралась — это отдельная беда, и молчать о ней тоже
+            # нельзя: непонятная дата хуже старой, потому что о ней нельзя даже
+            # сказать, насколько она стара.
+            return f" ⚠ дату последнего наблюдения ({self.last_date!r}) не удалось прочитать"
+        behind = ((today or date.today()) - observed).days
+        if behind <= limit:
+            return ""
+        return (
+            f" ⚠ ряд цен отстаёт на {behind} дн. при пороге {limit}: последнее наблюдение "
+            f"от {self.last_date}, а прогноз строится от него. Обновите ряд "
+            f"(scripts/fetch_prices.py) — иначе «последняя известная цена» относится "
+            f"к прошлому, а читается как сегодняшняя."
+        )
+
     def as_text(self) -> str:
         # Когда сценарий есть, числа ниже — УЖЕ сценарные. Пометка стоит прямо у
         # них, а не только в абзаце про сценарий: читатель берёт цифру из строки,
@@ -168,7 +199,8 @@ class ForecastReport:
         lines = [
             f"Инструмент: {self.instrument}",
             f"Последняя известная цена: {self.last_price:.2f} долл./барр. "
-            f"(последнее наблюдение в истории: {self.last_date})",
+            f"(последнее наблюдение в истории: {self.last_date})"
+            f"{self.staleness_note()}",
             f"Горизонт: {self.horizon_days} дн.",
             f"Метод: {self.method}",
             f"Прогноз на конец горизонта: {self.point:.2f} долл./барр.{mark}",
