@@ -241,6 +241,12 @@ def apply_supply_scenario(
         },
         residual_sigma=result.residual_sigma * central,
         n_observations=result.n_observations,
+        # ★Сценарий сдвигает ЧИСЛА, а не меняет природу метода. Не перенеся эти
+        # два поля, мы получили бы молчаливую потерю: факторный прогноз со
+        # сценарием стал бы «рядом» для самого себя и спросил бы у себя второе
+        # мнение, а плоская линия перестала бы называться плоской.
+        kind=result.kind,
+        flat_point_forecast=result.flat_point_forecast,
     )
 
 
@@ -253,7 +259,9 @@ def _second_opinion(series, horizon_days: int, primary) -> str | None:
     второго мнения без объяснения читалось бы как «методы согласны», а это самое
     вредное из возможных умолчаний.
     """
-    if primary.method.startswith("factor model"):
+    # ★По полю, а не по подстроке ярлыка: ярлык — текст для человека, и его
+    # правка (например, перевод на русский) не должна менять поведение.
+    if primary.kind == "factors":
         return None
     try:
         from neftegaz.forecast.factor_model import factor_forecast

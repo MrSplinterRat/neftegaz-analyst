@@ -191,7 +191,7 @@ def test_residual_sigma_stays_in_dollars(series):
     """
     result = arima_forecast(series, horizon=30)
     assert result.residual_sigma > 0.5
-    assert "USD/bbl" in result.interpretation()
+    assert "долл./барр." in result.interpretation()
 
 
 def test_horizon_must_be_positive(series):
@@ -448,3 +448,71 @@ def test_scenario_numbers_are_marked_at_the_line_itself(series, tmp_path):
     assert "множитель уже учтён" in with_scenario
     # Без сценария пометки быть не должно: она сообщала бы о том, чего не было.
     assert "множитель уже учтён" not in without
+
+
+# ── язык вывода: текст для человека идёт к человеку напрямую ────────────────
+
+
+def test_the_interpretation_is_in_russian_and_keeps_only_proper_names():
+    """★Единственное место расчётного блока, где текст шёл пересказом.
+
+    Абзац интерпретации был английским, и до читателя он доходил только через
+    языковую модель — то есть через того самого посредника, от которого расчёт
+    отгорожен ровно затем, чтобы числа не пересказывались. Латиница в абзаце
+    допустима только в именах: инструмент, название метода-аббревиатуры,
+    название организации.
+    """
+    import re
+
+    import pandas as pd
+
+    from neftegaz.forecast.models import forecast
+
+    index = pd.date_range("2026-01-01", periods=120, freq="D")
+    series = pd.Series([70.0 + (i % 7) * 0.4 for i in range(120)], index=index)
+
+    text = forecast(series, horizon=30, method="ses").interpretation()
+    latin = set(re.findall(r"[A-Za-z][A-Za-z/]{1,}", text))
+    assert latin <= {"Brent"}, f"в абзаце осталась латиница: {sorted(latin)}"
+    assert "прогноз" in text and "долл./барр." in text
+    # Плоская линия названа вслух: у модели уровня её нет по устройству, и
+    # читатель, взявший точечную оценку на 30 дней, обязан это знать.
+    assert "Линия прогноза плоская" in text
+
+
+def test_arima_says_nothing_about_a_flat_line():
+    """Отрицательный контроль: оговорка про плоскую линию не универсальна.
+
+    Если бы она печаталась всегда, она была бы не сведением о методе, а
+    украшением — и на методе с трендом прямо вводила бы в заблуждение.
+    """
+    import pandas as pd
+
+    from neftegaz.forecast.models import arima_forecast
+
+    index = pd.date_range("2026-01-01", periods=120, freq="D")
+    series = pd.Series([70.0 + i * 0.1 for i in range(120)], index=index)
+    assert "Линия прогноза плоская" not in arima_forecast(series, horizon=10).interpretation()
+
+
+def test_a_scenario_keeps_the_nature_of_the_method_it_shifts():
+    """★Пересборка результата не имеет права терять поля молча.
+
+    Сценарий сдвигает числа. Если бы при этом терялась природа метода,
+    факторный прогноз стал бы спрашивать второе мнение у самого себя, а плоская
+    линия перестала бы называться плоской — и ни одно из двух не сказало бы о
+    себе ни слова.
+    """
+    import pandas as pd
+
+    from neftegaz.forecast.models import forecast
+    from neftegaz.tools.forecast_tool import apply_supply_scenario
+
+    index = pd.date_range("2026-01-01", periods=120, freq="D")
+    series = pd.Series([70.0 + (i % 5) * 0.3 for i in range(120)], index=index)
+    base = forecast(series, horizon=30, method="ses")
+    shifted = apply_supply_scenario(base, supply_change_mb_d=-1.5, horizon_days=30)
+
+    assert shifted.kind == base.kind
+    assert shifted.flat_point_forecast == base.flat_point_forecast
+    assert "Линия прогноза плоская" in shifted.interpretation()

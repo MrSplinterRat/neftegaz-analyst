@@ -245,7 +245,7 @@ def test_factor_forecast_is_not_reachable_through_auto(price_history):
     from neftegaz.forecast.models import forecast
 
     auto = forecast(price_history, horizon=30, method="auto")
-    assert not auto.method.startswith("factor model")
+    assert auto.kind != "factors"
 
 
 def test_unknown_method_is_still_refused(price_history):

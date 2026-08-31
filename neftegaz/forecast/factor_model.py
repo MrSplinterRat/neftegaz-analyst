@@ -159,7 +159,11 @@ def factor_forecast(
     )
     return ForecastResult(
         frame=result,
-        method="factor model (supply and inventories, EIA projections)",
+        method="факторная модель (добыча и запасы из прогноза EIA)",
+        # ★Природа метода названа полем, а не подстрокой ярлыка: на ней стои́т
+        # решение «спрашивать ли второе мнение», и перевод ярлыка сломал бы его
+        # молча.
+        kind="factors",
         params={
             "supply_beta": model.supply_beta,
             "inventory_beta": model.inventory_beta,

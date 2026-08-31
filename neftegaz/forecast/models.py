@@ -53,22 +53,44 @@ class ForecastResult:
     params: dict
     residual_sigma: float
     n_observations: int
+    # ★ПРИРОДА МЕТОДА — ОТДЕЛЬНОЕ ПОЛЕ, А НЕ ПОДСТРОКА ЯРЛЫКА. Решение «нужно ли
+    # второе мнение» принималось по `method.startswith("factor model")`, то есть
+    # по английскому тексту, который человек читает на экране. Перевод ярлыка на
+    # русский сломал бы это решение МОЛЧА: проверка стала бы всегда ложной, и
+    # факторный прогноз начал бы спрашивать второе мнение у самого себя.
+    kind: str = "series"
+    # Плоская линия прогноза — свойство метода уровня, а не дефект расчёта. Знать
+    # об этом должен читатель, а не только автор кода, поэтому признак типизован
+    # и доезжает до текста интерпретации.
+    flat_point_forecast: bool = False
 
     def interpretation(self, instrument: str = "Brent") -> str:
-        """One short paragraph a human can read without opening the frame."""
+        """Один абзац, который человек читает, не открывая таблицу прогноза.
+
+        ★ПО-РУССКИ, ПОТОМУ ЧТО ЧИТАТЕЛЬ РУССКИЙ. Абзац был английским, и это
+        было единственное место расчётного блока, где текст доходил до человека
+        не напрямую, а пересказом языковой модели, — то есть ровно через того
+        посредника, от которого расчёт и отгорожен.
+        """
         first = self.frame.iloc[0]
         last = self.frame.iloc[-1]
         horizon = len(self.frame)
         width_start = float(first["upper"] - first["lower"])
         width_end = float(last["upper"] - last["lower"])
+        flat = (
+            " Линия прогноза плоская: у модели уровня нет слагаемого тренда — это "
+            "свойство метода, а не дефект расчёта, и потому здесь коридор важнее линии."
+            if self.flat_point_forecast
+            else ""
+        )
         return (
-            f"{instrument}: forecast {last['forecast']:.2f} USD/bbl at horizon "
-            f"{horizon} days ({self.method}, fitted on {self.n_observations} "
-            f"observations). The 95% band widens from {width_start:.2f} to "
-            f"{width_end:.2f} USD/bbl as the horizon grows — uncertainty scales "
-            f"with the square root of time, so a distant point estimate carries "
-            f"far less information than a near one. Residual sigma "
-            f"{self.residual_sigma:.2f} USD/bbl."
+            f"{instrument}: прогноз {last['forecast']:.2f} долл./барр. на горизонте "
+            f"{horizon} дн. ({self.method}, подгонка по {self.n_observations} "
+            f"наблюдениям). 95% коридор расширяется с {width_start:.2f} до "
+            f"{width_end:.2f} долл./барр. по мере удаления горизонта: "
+            f"неопределённость растёт как корень из времени, поэтому далёкая "
+            f"точечная оценка несёт куда меньше сведений, чем ближняя. Разброс "
+            f"остатков {self.residual_sigma:.2f} долл./барр.{flat}"
         )
 
 
@@ -191,10 +213,11 @@ def simple_exponential_smoothing(
     )
     return ForecastResult(
         frame=frame,
-        method="simple exponential smoothing",
+        method="простое экспоненциальное сглаживание",
         params={"alpha": alpha},
         residual_sigma=sigma,
         n_observations=len(observations),
+        flat_point_forecast=True,
     )
 
 
