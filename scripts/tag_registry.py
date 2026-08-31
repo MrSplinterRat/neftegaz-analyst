@@ -87,6 +87,18 @@ MAX_SUBJECTS = 4
 MARK_START = "<!-- ТЕГИ: начало сгенерированного указателя -->"
 MARK_END = "<!-- ТЕГИ: конец сгенерированного указателя -->"
 
+# ── Ссылки между записями ───────────────────────────────────────────────────
+# Якорь ставится ЯВНЫЙ, а не берётся из автоматического якоря заголовка. Причина:
+# автоматический строится из полного текста заголовка, то есть меняется от любой
+# правки формулировки — и все ссылки на запись молча превращаются в никуда.
+# Явный якорь привязан к номеру, а номер за решением закреплён навсегда.
+ANCHOR = '<a id="r-{n}"></a>'
+ANCHOR_RE = re.compile(r'^<a id="r-\d+"></a>\n', re.M)
+# Уже проставленная ссылка — чтобы прогон был идемпотентным, они сперва
+# разбираются обратно в голый номер, а затем ставятся заново.
+LINKED_RE = re.compile(r"\[(Р-\d+)\]\(#r-\d+\)")
+NUMBER_RE = re.compile(r"(?<!\[)(Р-(\d+))")
+
 
 class Record:
     def __init__(self, number: str, title: str, body: str, start: int) -> None:
@@ -329,6 +341,48 @@ def apply(text: str, records: list[Record]) -> str:
     return text
 
 
+def linkify(text: str, known: set[str]) -> tuple[str, int, int]:
+    """Проставить якоря у записей и превратить номера в ссылки.
+
+    ★Порядок работы: сперва всё РАЗБИРАЕТСЯ обратно (ссылки в голые номера,
+    якоря удаляются), потом ставится заново. Так прогон идемпотентен по
+    устройству, а не по аккуратности регулярного выражения: повторный запуск не
+    может дать `[[Р-119](#r-119)](#r-119)`, потому что вложенного случая просто
+    не возникает.
+
+    Ссылкой становится номер ВЕЗДЕ, кроме заголовка самой записи: внутри записи
+    ссылка на соседнюю нужна ровно так же, как в указателе, — «отменяет Р-061»
+    без перехода заставляет читателя искать вручную по шести тысячам строк.
+
+    Номер, для которого записи нет, ссылкой НЕ становится. Такой случай — ошибка
+    (в реестре сейчас таких нет, но появиться они могут), и превращать её в
+    ссылку в никуда значит прятать.
+    """
+    text = LINKED_RE.sub(r"\1", text)
+    text = ANCHOR_RE.sub("", text)
+
+    anchors = 0
+    links = 0
+    out: list[str] = []
+    for line in text.split("\n"):
+        m = re.match(r"^### (Р-(\d+))\. ", line)
+        if m:
+            out.append(ANCHOR.format(n=m.group(2)))
+            anchors += 1
+            out.append(line)  # заголовок не трогаем: ссылка сама на себя не нужна
+            continue
+
+        def repl(mo: re.Match[str]) -> str:
+            nonlocal links
+            if mo.group(1) not in known:
+                return mo.group(1)
+            links += 1
+            return f"[{mo.group(1)}](#r-{mo.group(2)})"
+
+        out.append(NUMBER_RE.sub(repl, line))
+    return "\n".join(out), anchors, links
+
+
 def main() -> int:
     text = REGISTRY.read_text(encoding="utf-8")
     records = parse(text)
@@ -340,8 +394,11 @@ def main() -> int:
         return 0
 
     shutil.copy(REGISTRY, REGISTRY.with_suffix(".md.bak"))
-    REGISTRY.write_text(apply(text, records), encoding="utf-8")
-    print(f"\nзаписано; резервная копия — {REGISTRY.with_suffix('.md.bak').name}")
+    new = apply(text, records)
+    new, anchors, links = linkify(new, {r.number for r in records})
+    REGISTRY.write_text(new, encoding="utf-8")
+    print(f"\nякорей: {anchors} · ссылок на записи: {links}")
+    print(f"записано; резервная копия — {REGISTRY.with_suffix('.md.bak').name}")
     return 1 if bad else 0
 
 
