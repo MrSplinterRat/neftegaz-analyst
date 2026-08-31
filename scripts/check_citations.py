@@ -26,10 +26,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# «[Отчёт EIA STEO, июль 2026, с. 34–35]» — и вариант с одной страницей.
-CITATION = re.compile(
-    r"\[Отчёт\s+([^,\]]+),\s*([а-яё]+\s+\d{4}),\s*с\.\s*(\d+)(?:\s*[–—-]\s*(\d+))?\]"
-)
+# ★Шаблон ссылки берётся из библиотеки, а не пишется здесь второй раз. Копия
+# разошлась бы с оригиналом при первой правке формата — и разошлась бы молча:
+# сверка перестала бы находить цитаты и отчиталась бы о чистоте ровно тем же
+# тоном, что и полная. Так уже случилось однажды, когда ссылки стали носить
+# пометку о ступени чтения.
+from neftegaz.tools.citations import CITATION  # noqa: E402
+
 # Числа, которые вообще имеет смысл сверять: с десятичной частью. Целые вроде
 # «2026» или «95%» — это годы и доли, они стоят в тексте ответа, а не в таблице,
 # и требовать их дословного присутствия значило бы плодить ложные тревоги.
@@ -163,20 +166,19 @@ def load_corpus() -> dict:
     return pages
 
 
-def main() -> int:
-    # Каталог ответов задаётся первым доводом: это позволяет проверить саму
-    # проверку на подложных ответах, не трогая настоящие.
-    where = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "demo"
-    answers = sorted(where.glob("*.md"))
-    if not answers:
-        print(f"проверка не отработала: в {where} нет ответов", file=sys.stderr)
-        return 2
-    pages = load_corpus()
-    if not pages:
-        print("проверка не отработала: корпус в data/reports пуст", file=sys.stderr)
-        return 2
-    print(f"корпус: {len(pages)} страниц, ответов: {len(answers)}")
+def run(answers: list[Path], pages: dict) -> tuple[int, dict]:
+    """Сверить готовые ответы с готовым корпусом. Возвращает код и счётчики.
 
+    ★ВЫНЕСЕНО ИЗ `main` РАДИ АВТОМАТИЧЕСКОЙ ПРИЁМКИ. Проверяемость ссылок —
+    предмет поставки, а проверялась она запуском скрипта руками; пока проверка
+    зависит от того, вспомнит ли о ней человек, её с тем же успехом может не
+    быть. Тест вызывает `run` с подложными ответами и подложным корпусом и тем
+    самым проверяет не только ответы, но и то, что проверка УМЕЕТ УПАСТЬ.
+
+    Корпус приходит доводом, а не читается отсюда: настоящие отчёты в публичный
+    репозиторий не выкладываются, и тест, который может работать только при них,
+    в чужой копии молча превратился бы в пропуск.
+    """
     checked = missing = unmarked = web = 0
     per_answer: list[tuple[str, int, int, int, int, set]] = []
     for answer in answers:
@@ -234,7 +236,11 @@ def main() -> int:
                     haystack = ""
                     pieces = []
                     for citation in citations:
-                        _source, date, first, last = citation.groups()
+                        # Пятая группа — пометка о ступени чтения, дописанная в
+                        # ссылку кодом. Для сверки чисел она безразлична: число
+                        # либо стои́т на названной странице, либо нет, и спорность
+                        # чтения этого не меняет.
+                        _source, date, first, last, _note = citation.groups()
                         pieces.append(f"{date} с.{first}" + (f"-{last}" if last else ""))
                         for number in range(int(first), int(last or first) + 1):
                             haystack += " " + pages.get((date, number), "")
@@ -279,8 +285,9 @@ def main() -> int:
         f"\nсверено чисел: {checked}, не подтверждено: {missing}, "
         f"без ссылки: {unmarked}, из веба (непроверяемо): {web}"
     )
+    totals = {"checked": checked, "missing": missing, "unmarked": unmarked, "web": web}
     if missing or unmarked:
-        return 1
+        return 1, totals
     # ★Ноль сверенных — не успех. Пустая проверка выдала бы «всё чисто» ровно
     # так же, как исправная, и это тот самый случай, когда проверка отвечает
     # одинаково при полном отказе проверяемого.
@@ -289,8 +296,25 @@ def main() -> int:
             "проверка не отработала: в ответах не нашлось ни одного числа со ссылкой",
             file=sys.stderr,
         )
+        return 2, totals
+    return 0, totals
+
+
+def main() -> int:
+    # Каталог ответов задаётся первым доводом: это позволяет проверить саму
+    # проверку на подложных ответах, не трогая настоящие.
+    where = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "demo"
+    answers = sorted(where.glob("*.md"))
+    if not answers:
+        print(f"проверка не отработала: в {where} нет ответов", file=sys.stderr)
         return 2
-    return 0
+    pages = load_corpus()
+    if not pages:
+        print("проверка не отработала: корпус в data/reports пуст", file=sys.stderr)
+        return 2
+    print(f"корпус: {len(pages)} страниц, ответов: {len(answers)}")
+    code, _totals = run(answers, pages)
+    return code
 
 
 if __name__ == "__main__":
